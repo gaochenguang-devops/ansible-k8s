@@ -20,12 +20,13 @@ ansible-playbook playbooks/cluster.yml
 ansible-playbook playbooks/verify.yml
 ```
 
-当前默认 reset 偏向彻底清理，适合把节点恢复到可重新部署的状态。默认会清理 kubeadm 状态、CNI 状态、Pod 日志、HAProxy/Keepalived 配置、Kubernetes 软件源、iptables/ip6tables/IPVS、`/etc/hosts` 管理块和断点状态。
+当前默认 reset 偏向彻底清理，适合把节点恢复到可重新部署的状态。默认会清理 kubeadm 状态、CNI 状态、Pod 日志、证书续期脚本、HAProxy/Keepalived 配置、Kubernetes 软件源、iptables/ip6tables/IPVS、`/etc/hosts` 管理块和断点状态。
 
 核心变量：
 
 ```yaml
 reset_remove_packages: true
+reset_remove_state: true
 reset_remove_containerd_data: true
 reset_remove_downloads: true
 reset_remove_etc_hosts: true
@@ -59,9 +60,31 @@ ansible-playbook playbooks/cluster.yml --tags os
 ansible-playbook playbooks/cluster.yml --tags runtime
 ansible-playbook playbooks/cluster.yml --tags repo
 ansible-playbook playbooks/cluster.yml --tags packages
+ansible-playbook playbooks/cluster.yml --tags lb
 ansible-playbook playbooks/cluster.yml --tags control-plane
 ansible-playbook playbooks/cluster.yml --tags cni
 ansible-playbook playbooks/cluster.yml --tags workers
+ansible-playbook playbooks/cluster.yml --tags certs
+```
+
+## 证书续期
+
+完整部署完成后，`cluster.yml` 默认会在 control-plane 节点执行证书续期阶段。需要单独续期时运行：
+
+```bash
+ansible-playbook playbooks/update-certs.yml
+```
+
+默认只有证书剩余有效期低于 `kubeadm_cert_renewal_min_remaining_days` 才会重签。需要立即强制重签时运行：
+
+```bash
+ansible-playbook playbooks/update-certs.yml -e kubeadm_cert_renewal_force=true
+```
+
+查看当前证书有效期：
+
+```bash
+ansible kube_control_plane -m shell -a "kubeadm certs check-expiration"
 ```
 
 ## 断点续跑

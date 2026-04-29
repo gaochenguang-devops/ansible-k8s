@@ -246,6 +246,18 @@
     - not kubeadm_kubelet_conf.stat.exists
   throttle: 1
 
+- name: Copy admin kubeconfig
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: "{{ kubeconfig_home }}/.kube/config"
+    remote_src: true
+    owner: "{{ kubeconfig_owner }}"
+    group: "{{ kubeconfig_group }}"
+    mode: "0600"
+  when: 
+    - inventory_hostname != groups['kube_control_plane'][0]
+    - not kubeadm_kubelet_conf.stat.exists
+
 - name: Check local control-plane kubeconfig files
   ansible.builtin.stat:
     path: "{{ item }}"

@@ -13,6 +13,7 @@
 - 高可用控制面：多 master 时自动部署 Keepalived + HAProxy，提供 `VIP:16443` 作为 kube-apiserver 入口。
 - 幂等部署：重复执行会跳过已初始化 master、已加入节点，并用 `kubectl apply` 或 `helm upgrade --install` 收敛 CNI。
 - 断点续跑：支持按阶段记录 checkpoint，中断后继续跑。
+- 证书有效期：部署后默认把 kubeadm 主要证书设置为 100 年，并支持单独执行续期剧本。
 - 运维操作：支持验证、清理、扩容 master/worker、删除 master/worker。
 - 主机名和 hosts：可按 inventory 自动设置主机名，并维护、清理目标机 `/etc/hosts` 中的集群解析块。
 
@@ -68,6 +69,7 @@ ansible-k8s/
 │   ├── reset.yml                       # 清理集群
 │   ├── scale-up.yml                    # 新增 master 或 worker
 │   ├── remove-node.yml                 # 删除 master 或 worker
+│   ├── update-certs.yml                # 手动更新 kubeadm 证书有效期
 │   └── resume-status.yml               # 查看断点状态
 ├── roles/
 │   ├── preflight                       # 参数、系统、CNI、cgroup 等前置检查
@@ -78,6 +80,7 @@ ansible-k8s/
 │   ├── kubernetes_packages             # kubelet/kubeadm/kubectl 安装和 hold
 │   ├── kubeadm_control_plane           # 初始化或加入控制面
 │   ├── kubeadm_workers                 # worker 加入集群
+│   ├── kubeadm_cert_renewal            # 更新 kubeadm 证书有效期
 │   ├── cni                             # Calico/Flannel/Cilium
 │   ├── verify_cluster                  # 健康检查
 │   ├── reset_cluster                   # kubeadm reset 和状态清理
@@ -455,6 +458,7 @@ preflight 会检查：
 
 - inventory 分组是否正确。
 - Kubernetes 版本格式是否正确。
+- 证书续期变量是否合理。
 - 多 master 是否配置了 VIP。
 - CNI 是否支持。
 - containerd 是否是当前支持的运行时。
@@ -480,6 +484,7 @@ ansible-playbook playbooks/cluster.yml
 7. `control_plane`：初始化第一个 master，加入其他 master。
 8. `cni`：安装 Calico、Flannel 或 Cilium。
 9. `workers`：加入 worker 节点。
+10. `certs`：更新 kubeadm 证书有效期，默认更新为 100 年。
 
 ### 4. 验证集群
 
@@ -546,6 +551,7 @@ kubernetes_packages
 control_plane
 cni
 workers
+certs
 ```
 
 断点文件保存在控制端：
@@ -555,6 +561,42 @@ workers
 ```
 
 执行 `reset.yml` 后默认会清理断点，避免 reset 后再次部署时误跳过阶段。
+
+## 证书有效期
+
+部署完成后，剧本默认会在每个 control-plane 节点运行 `kubeadm_cert_renewal`，把 kubeadm 生成的主要证书更新为 100 年：
+
+```yaml
+kubeadm_certificate_validity_period: "876000h"
+kubeadm_ca_certificate_validity_period: "876000h"
+kubeadm_cert_renewal_enabled: true
+kubeadm_cert_renewal_days: 36500
+kubeadm_cert_renewal_min_remaining_days: 36400
+kubeadm_cert_renewal_scope: "all"
+kubeadm_cert_renewal_force: false
+```
+
+Kubernetes 1.31+ 会通过 kubeadm v1beta4 配置直接生成 100 年证书和 CA 证书；旧版本不支持这些 kubeadm 字段时，会在部署后通过续期脚本重签主要证书。旧版本的 CA 证书不由脚本静默替换，如需 CA 也变为 100 年，建议使用 Kubernetes 1.31+ 重新部署或单独规划 CA 轮换。
+
+这个功能基于项目内的 `update-kubeadm-cert.sh` 思路实现，实际下发的是 `roles/kubeadm_cert_renewal/templates/update-kubeadm-cert.sh.j2`，已改成适配 containerd/crictl。它会更新 apiserver、apiserver-kubelet-client、front-proxy-client、etcd server/peer/healthcheck-client、apiserver-etcd-client，以及 admin/super-admin/controller-manager/scheduler/kubelet kubeconfig 中的客户端证书。
+
+手动更新：
+
+```bash
+ansible-playbook playbooks/update-certs.yml
+```
+
+强制重签：
+
+```bash
+ansible-playbook playbooks/update-certs.yml -e kubeadm_cert_renewal_force=true
+```
+
+查看有效期：
+
+```bash
+ansible kube_control_plane -m shell -a "kubeadm certs check-expiration"
+```
 
 ## 分阶段执行和排错
 
@@ -629,6 +671,7 @@ packages
 kubeadm
 control-plane
 workers
+certs
 cni
 verify
 reset
@@ -701,6 +744,7 @@ ansible-playbook playbooks/reset.yml
 
 ```yaml
 reset_remove_packages: true
+reset_remove_state: true
 reset_remove_containerd_data: true
 reset_remove_downloads: true
 reset_remove_etc_hosts: true
@@ -728,6 +772,7 @@ resume_clear_on_reset: true
 - 删除 containerd 数据。
 - 删除 containerd 配置和 crictl 配置。
 - 删除下载的 CNI manifest 和 Helm 临时包。
+- 删除证书续期脚本 `/usr/local/sbin/update-kubeadm-cert.sh`。
 - 清理目标机 `/etc/hosts` 中 Ansible 管理的集群解析块。
 - 清理 iptables、ip6tables 和 IPVS。
 - 删除 Kubernetes 软件源文件。
@@ -801,7 +846,7 @@ apiserver_lb_port: 16443
 3. 执行 master 扩容：
 
 ```bash
-ansible-playbook playbooks/scale-up.yml --tags preflight,os,lb,runtime,packages,control-plane
+ansible-playbook playbooks/scale-up.yml --tags preflight,os,lb,runtime,packages,control-plane,certs
 ansible-playbook playbooks/verify.yml
 ```
 
@@ -1149,7 +1194,7 @@ ansible-playbook playbooks/verify.yml
 新增 master：
 
 ```bash
-ansible-playbook playbooks/scale-up.yml --tags preflight,os,lb,runtime,packages,control-plane
+ansible-playbook playbooks/scale-up.yml --tags preflight,os,lb,runtime,packages,control-plane,certs
 ansible-playbook playbooks/verify.yml
 ```
 

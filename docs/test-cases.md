@@ -79,6 +79,7 @@ ansible k8s_cluster -m shell -a "iptables-save | egrep 'KUBE-|CALI-|CILIUM|FLANN
 | M7 | 老系统 cgroup v1 兼容 | CentOS 7 等 | 任一 | Calico/Flannel | P2 |
 | M8 | 清理和重复清理 | 任一 | 已部署集群 | 任一 | P0 |
 | M9 | 扩容和缩容 | HA 环境 | 3 master + worker | Calico | P0 |
+| M10 | kubeadm 证书续期 | 任一 | 单 master/HA | 任一 | P0 |
 
 ## 静态和预检
 
@@ -98,6 +99,7 @@ ansible-playbook --syntax-check playbooks/reset.yml
 ansible-playbook --syntax-check playbooks/verify.yml
 ansible-playbook --syntax-check playbooks/scale-up.yml
 ansible-playbook --syntax-check playbooks/remove-node.yml
+ansible-playbook --syntax-check playbooks/update-certs.yml
 ansible-playbook --syntax-check playbooks/resume-status.yml
 ```
 
@@ -299,12 +301,89 @@ ansible-playbook playbooks/cluster.yml --tags repo
 ansible-playbook playbooks/cluster.yml --tags packages
 ansible-playbook playbooks/cluster.yml --tags cni
 ansible-playbook playbooks/cluster.yml --tags workers
+ansible-playbook playbooks/cluster.yml --tags certs
 ```
 
 预期结果：
 
 - 每个 tag 都能执行到对应阶段。
 - 重复执行不破坏已有集群。
+
+## 证书续期
+
+### TC-151 部署后自动设置 100 年证书
+
+级别：P0
+
+目的：验证完整部署后 kubeadm 主要证书有效期被设置为约 100 年。
+
+前置条件：
+
+- TC-101 或 TC-201 已成功。
+- `kubeadm_cert_renewal_enabled: true`。
+
+步骤：
+
+```bash
+ansible kube_control_plane -m shell -a "kubeadm certs check-expiration"
+ansible kube_control_plane -m shell -a "openssl x509 -checkend $((36400*86400)) -noout -in /etc/kubernetes/pki/apiserver.crt"
+ansible kube_control_plane -m shell -a "openssl x509 -checkend $((36400*86400)) -noout -in /etc/kubernetes/pki/apiserver-kubelet-client.crt"
+ansible kube_control_plane -m shell -a "openssl x509 -checkend $((36400*86400)) -noout -in /etc/kubernetes/pki/front-proxy-client.crt"
+```
+
+预期结果：
+
+- `kubeadm certs check-expiration` 显示主要证书接近 100 年。
+- `openssl -checkend` 返回成功。
+- Kubernetes 1.31+ 使用 kubeadm v1beta4 时，CA 证书也应接近 100 年。
+
+### TC-152 手动续期剧本幂等
+
+级别：P0
+
+目的：验证 `update-certs.yml` 可以单独执行，且证书剩余有效期足够时不会反复重签。
+
+前置条件：
+
+- TC-151 已成功。
+
+步骤：
+
+```bash
+ansible-playbook playbooks/update-certs.yml
+ansible-playbook playbooks/verify.yml
+```
+
+预期结果：
+
+- 剩余有效期高于 `kubeadm_cert_renewal_min_remaining_days` 时，`Renew kubeadm certificates` 任务被跳过。
+- 集群仍然 Ready。
+
+### TC-153 强制重签证书
+
+级别：P1
+
+目的：验证需要立即刷新证书时可以强制重签。
+
+前置条件：
+
+- 已部署可用集群。
+
+步骤：
+
+```bash
+ansible-playbook playbooks/update-certs.yml -e kubeadm_cert_renewal_force=true
+ansible-playbook playbooks/verify.yml
+ansible kube_control_plane -m shell -a "kubeadm certs check-expiration"
+ansible kube_control_plane -m shell -a "ls -d /etc/kubernetes.old-$(date +%Y%m%d)"
+```
+
+预期结果：
+
+- control-plane 节点上生成 `/usr/local/sbin/update-kubeadm-cert.sh`。
+- `/etc/kubernetes.old-YYYYMMDD` 备份目录存在。
+- apiserver、controller-manager、scheduler、kubelet 重启后集群恢复 Ready。
+- 证书有效期符合 `kubeadm_cert_renewal_days`。
 
 ## HA 控制面
 
@@ -729,7 +808,7 @@ ansible "kube_control_plane[0]" -m shell -a "kubectl --kubeconfig /etc/kubernete
 步骤：
 
 ```bash
-ansible-playbook playbooks/scale-up.yml --tags preflight,os,lb,runtime,packages,control-plane
+ansible-playbook playbooks/scale-up.yml --tags preflight,os,lb,runtime,packages,control-plane,certs
 ansible-playbook playbooks/verify.yml
 ```
 
@@ -762,7 +841,7 @@ ansible "kube_control_plane[0]" -m shell -a "kubectl --kubeconfig /etc/kubernete
 步骤：
 
 ```bash
-ansible-playbook playbooks/scale-up.yml --tags preflight,os,lb,runtime,packages,control-plane
+ansible-playbook playbooks/scale-up.yml --tags preflight,os,lb,runtime,packages,control-plane,certs
 ansible-playbook playbooks/verify.yml
 ```
 
@@ -1046,6 +1125,7 @@ ansible-playbook playbooks/cluster.yml --tags repo,runtime,cni
 
 - TC-001、TC-002、TC-003 通过。
 - TC-101、TC-102、TC-501、TC-502、TC-504 通过。
+- TC-151、TC-152 通过；需要验证强制重签时 TC-153 通过。
 - 如果启用多 master，TC-201 通过。
 - 如果使用 Calico，TC-301 通过。
 - 如果使用 Flannel，TC-302 通过。
@@ -1060,14 +1140,15 @@ ansible-playbook playbooks/cluster.yml --tags repo,runtime,cni
 
 1. `TC-001` 到 `TC-003`
 2. `TC-101` 到 `TC-103`
-3. `TC-301`、`TC-302`、`TC-303`
-4. `TC-401` 到 `TC-404`
-5. `TC-201` 到 `TC-203`
-6. `TC-601`、`TC-602`
-7. `TC-701` 到 `TC-704`
-8. `TC-801` 到 `TC-803`
-9. `TC-901` 到 `TC-904`
-10. `TC-501` 到 `TC-504`
+3. `TC-151` 到 `TC-153`
+4. `TC-301`、`TC-302`、`TC-303`
+5. `TC-401` 到 `TC-404`
+6. `TC-201` 到 `TC-203`
+7. `TC-601`、`TC-602`
+8. `TC-701` 到 `TC-704`
+9. `TC-801` 到 `TC-803`
+10. `TC-901` 到 `TC-904`
+11. `TC-501` 到 `TC-504`
 
 每完成一个破坏性用例后，建议执行：
 

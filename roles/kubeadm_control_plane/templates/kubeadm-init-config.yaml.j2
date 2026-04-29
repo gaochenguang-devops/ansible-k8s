@@ -14,6 +14,10 @@ kubernetesVersion: "v{{ kube_version }}"
 {% endif %}
 controlPlaneEndpoint: "{{ kube_control_plane_endpoint }}"
 imageRepository: "{{ kube_image_repository }}"
+{% if kubeadm_config_api_version == 'kubeadm.k8s.io/v1beta4' %}
+certificateValidityPeriod: "{{ kubeadm_certificate_validity_period }}"
+caCertificateValidityPeriod: "{{ kubeadm_ca_certificate_validity_period }}"
+{% endif %}
 networking:
   dnsDomain: "{{ kube_dns_domain }}"
   podSubnet: "{{ pod_network_cidr }}"

@@ -60,6 +60,14 @@ kubeadm_init_extra_args: []
 kubeadm_join_extra_args: []
 kubeadm_config_dir: "/etc/kubernetes/kubeadm"
 kubeadm_config_api_version: "{{ 'kubeadm.k8s.io/v1beta4' if kube_effective_semver_for_checks is version('1.31.0', '>=') else 'kubeadm.k8s.io/v1beta3' }}"
+kubeadm_certificate_validity_period: "876000h"
+kubeadm_ca_certificate_validity_period: "876000h"
+kubeadm_cert_renewal_enabled: true
+kubeadm_cert_renewal_days: 36500
+kubeadm_cert_renewal_min_remaining_days: 36400
+kubeadm_cert_renewal_scope: "all"
+kubeadm_cert_renewal_force: false
+kubeadm_cert_renewal_script_path: /usr/local/sbin/update-kubeadm-cert.sh
 kubeadm_migrate_existing_control_plane_endpoint: true
 kubeadm_rotate_apiserver_cert_for_endpoint: true
 kubeadm_update_kubeconfigs_to_control_plane_endpoint: true
@@ -125,6 +133,7 @@ resume_clear_on_reset: true
 # Reset behavior. Defaults favor a thorough cluster cleanup while keeping
 # containerd/LB packages installed so a redeploy can reinstall configs quickly.
 reset_remove_packages: true
+reset_remove_state: true
 reset_remove_containerd_data: true
 reset_remove_downloads: true
 reset_remove_etc_hosts: true
@@ -166,6 +175,7 @@ reset_kubernetes_state_paths:
   - /var/lib/cilium
   - /var/lib/tigera
   - "{{ kubeconfig_home }}/.kube/config"
+  - "{{ kubeadm_cert_renewal_script_path }}"
 reset_kubelet_config_paths:
   - /etc/default/kubelet
   - /etc/sysconfig/kubelet

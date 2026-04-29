@@ -50,6 +50,19 @@
       - kube_version | string | length == 0 or kube_version is version('1.24.0', '>=')
     fail_msg: "Use kube_version like 1.36.0, or set it to an empty string and choose kube_repo_minor_version like 1.36."
 
+- name: Validate kubeadm certificate renewal inputs
+  ansible.builtin.assert:
+    that:
+      - kubeadm_cert_renewal_scope in ['all', 'master', 'etcd']
+      - kubeadm_cert_renewal_days | int > 0
+      - kubeadm_cert_renewal_min_remaining_days | int >= 0
+      - kubeadm_cert_renewal_min_remaining_days | int < kubeadm_cert_renewal_days | int
+      - kubeadm_cert_renewal_script_path | length > 0
+    fail_msg: >-
+      Set kubeadm certificate renewal variables correctly: scope must be all/master/etcd,
+      days must be greater than min_remaining_days, and script_path must not be empty.
+  when: kubeadm_cert_renewal_enabled | bool
+
 - name: Detect cgroup filesystem
   ansible.builtin.command: stat -fc %T /sys/fs/cgroup
   register: cgroup_fs_type

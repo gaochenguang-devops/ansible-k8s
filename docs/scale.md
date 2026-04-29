@@ -15,7 +15,7 @@ apiserver_lb_port: 16443
 4. Run:
 
 ```bash
-ansible-playbook playbooks/scale-up.yml --tags preflight,os,lb,runtime,packages,control-plane
+ansible-playbook playbooks/scale-up.yml --tags preflight,os,lb,runtime,packages,control-plane,certs
 ansible-playbook playbooks/verify.yml
 ```
 

@@ -41,6 +41,7 @@ ansible-playbook playbooks/verify.yml
 | 7 | `control_plane` | 初始化第一个 master，并把其他 master 加入控制面 | `kubeadm`, `control-plane` |
 | 8 | `cni` | 安装 Calico、Flannel 或 Cilium | `cni` |
 | 9 | `workers` | 把 worker 节点加入集群 | `kubeadm`, `workers` |
+| 10 | `certs` | 更新 kubeadm 主要证书有效期，默认 100 年 | `certs`, `certificates` |
 
 ## 推荐新装流程
 
@@ -83,6 +84,21 @@ ansible-playbook playbooks/cluster.yml --tags lb
 ansible-playbook playbooks/cluster.yml --tags control-plane
 ansible-playbook playbooks/cluster.yml --tags cni
 ansible-playbook playbooks/cluster.yml --tags workers
+ansible-playbook playbooks/cluster.yml --tags certs
+```
+
+## 证书续期
+
+完整部署会自动执行 `certs` 阶段。后续需要单独检查并续期时，可以直接运行：
+
+```bash
+ansible-playbook playbooks/update-certs.yml
+```
+
+如果已经是 100 年证书，默认会跳过重签。需要强制重新生成时：
+
+```bash
+ansible-playbook playbooks/update-certs.yml -e kubeadm_cert_renewal_force=true
 ```
 
 ## 断点续跑
@@ -146,7 +162,7 @@ ansible-playbook playbooks/reset.yml \
 ansible-playbook playbooks/scale-up.yml --tags preflight,os,runtime,packages,workers
 
 # 新增 master
-ansible-playbook playbooks/scale-up.yml --tags preflight,os,lb,runtime,packages,control-plane
+ansible-playbook playbooks/scale-up.yml --tags preflight,os,lb,runtime,packages,control-plane,certs
 ```
 
 删除节点时，先执行删除 playbook，成功后再从 inventory 移除：

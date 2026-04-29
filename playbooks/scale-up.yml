@@ -88,3 +88,16 @@
         - kubeadm
         - workers
         - worker
+
+- name: Renew kubeadm certificates after scale-up
+  hosts: kube_control_plane
+  gather_facts: true
+  any_errors_fatal: true
+  serial: 1
+  environment: *proxy_environment
+  roles:
+    - role: kubeadm_cert_renewal
+      when: kubeadm_cert_renewal_enabled | bool
+      tags:
+        - certs
+        - certificates

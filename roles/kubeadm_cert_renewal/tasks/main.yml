@@ -1,0 +1,138 @@
+---
+- name: Check if this control-plane node has kubeadm state
+  ansible.builtin.stat:
+    path: "{{ kubeconfig_path }}"
+  register: kubeadm_cert_renewal_kubeconfig
+
+- name: Validate kubeadm certificate renewal inputs
+  ansible.builtin.assert:
+    that:
+      - kubeadm_cert_renewal_scope in ['all', 'master', 'etcd']
+      - kubeadm_cert_renewal_days | int > 0
+      - kubeadm_cert_renewal_min_remaining_days | int >= 0
+      - kubeadm_cert_renewal_min_remaining_days | int < kubeadm_cert_renewal_days | int
+      - kubeadm_cert_renewal_script_path | length > 0
+    fail_msg: >-
+      Set kubeadm certificate renewal variables correctly: scope must be all/master/etcd,
+      days must be greater than min_remaining_days, and script_path must not be empty.
+    quiet: true
+  when: kubeadm_cert_renewal_enabled | bool
+
+- name: Ensure OpenSSL is installed for certificate renewal
+  ansible.builtin.package:
+    name: openssl
+    state: present
+  when:
+    - kubeadm_cert_renewal_enabled | bool
+    - kubeadm_cert_renewal_kubeconfig.stat.exists
+
+- name: Ensure kubeadm certificate renewal script directory exists
+  ansible.builtin.file:
+    path: "{{ kubeadm_cert_renewal_script_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - kubeadm_cert_renewal_enabled | bool
+    - kubeadm_cert_renewal_kubeconfig.stat.exists
+
+- name: Install kubeadm certificate renewal script
+  ansible.builtin.template:
+    src: update-kubeadm-cert.sh.j2
+    dest: "{{ kubeadm_cert_renewal_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - kubeadm_cert_renewal_enabled | bool
+    - kubeadm_cert_renewal_kubeconfig.stat.exists
+
+- name: Check kubeadm certificate remaining lifetime
+  ansible.builtin.shell: |
+    set -e
+    check_seconds={{ (kubeadm_cert_renewal_min_remaining_days | int) * 86400 }}
+    certs=(
+      /etc/kubernetes/pki/apiserver.crt
+      /etc/kubernetes/pki/apiserver-kubelet-client.crt
+      /etc/kubernetes/pki/front-proxy-client.crt
+      /etc/kubernetes/pki/apiserver-etcd-client.crt
+      /etc/kubernetes/pki/etcd/server.crt
+      /etc/kubernetes/pki/etcd/peer.crt
+      /etc/kubernetes/pki/etcd/healthcheck-client.crt
+    )
+    for cert in "${certs[@]}"; do
+      [ -r "$cert" ] || continue
+      openssl x509 -checkend "$check_seconds" -noout -in "$cert"
+    done
+
+    kubeconfigs=(
+      /etc/kubernetes/admin.conf
+      /etc/kubernetes/super-admin.conf
+      /etc/kubernetes/controller-manager.conf
+      /etc/kubernetes/scheduler.conf
+      /etc/kubernetes/kubelet.conf
+    )
+    tmp_cert=$(mktemp)
+    trap 'rm -f "$tmp_cert"' EXIT
+    for kubeconfig in "${kubeconfigs[@]}"; do
+      [ -r "$kubeconfig" ] || continue
+      cert_data=$(awk '/client-certificate-data:/ { print $2; exit }' "$kubeconfig")
+      [ -n "$cert_data" ] || continue
+      printf '%s' "$cert_data" | base64 -d > "$tmp_cert"
+      openssl x509 -checkend "$check_seconds" -noout -in "$tmp_cert"
+    done
+  args:
+    executable: /bin/bash
+  register: kubeadm_cert_renewal_lifetime_check
+  changed_when: false
+  failed_when: false
+  when:
+    - kubeadm_cert_renewal_enabled | bool
+    - kubeadm_cert_renewal_kubeconfig.stat.exists
+
+- name: Renew kubeadm certificates
+  ansible.builtin.command:
+    argv:
+      - "{{ kubeadm_cert_renewal_script_path }}"
+      - "{{ kubeadm_cert_renewal_scope }}"
+  environment:
+    CERT_DAYS: "{{ kubeadm_cert_renewal_days | string }}"
+    KUBE_PATH: /etc/kubernetes
+    RUNTIME_ENDPOINT: "{{ cri_socket }}"
+  register: kubeadm_cert_renewal_result
+  changed_when: true
+  when:
+    - kubeadm_cert_renewal_enabled | bool
+    - kubeadm_cert_renewal_kubeconfig.stat.exists
+    - kubeadm_cert_renewal_force | bool or (kubeadm_cert_renewal_lifetime_check.rc is defined and kubeadm_cert_renewal_lifetime_check.rc != 0)
+
+- name: Wait for Kubernetes API after certificate renewal
+  ansible.builtin.command: "kubectl --kubeconfig {{ kubeconfig_path }} get --raw=/readyz"
+  register: kubeadm_cert_renewal_api_ready
+  changed_when: false
+  retries: 30
+  delay: 5
+  until: kubeadm_cert_renewal_api_ready.rc == 0
+  when:
+    - kubeadm_cert_renewal_enabled | bool
+    - kubeadm_cert_renewal_kubeconfig.stat.exists
+    - kubeadm_cert_renewal_result is defined
+    - kubeadm_cert_renewal_result.changed | default(false) | bool
+
+- name: Show kubeadm certificate expiration
+  ansible.builtin.command: kubeadm certs check-expiration
+  register: kubeadm_cert_renewal_expiration
+  changed_when: false
+  failed_when: false
+  when:
+    - kubeadm_cert_renewal_enabled | bool
+    - kubeadm_cert_renewal_kubeconfig.stat.exists
+
+- name: Print kubeadm certificate expiration
+  ansible.builtin.debug:
+    var: kubeadm_cert_renewal_expiration.stdout_lines
+  when:
+    - kubeadm_cert_renewal_enabled | bool
+    - kubeadm_cert_renewal_kubeconfig.stat.exists
+    - kubeadm_cert_renewal_expiration.stdout_lines is defined

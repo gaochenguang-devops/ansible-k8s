@@ -13,6 +13,21 @@
 | `calico_version` / `flannel_version` / `cilium_version` | CNI 版本。 |
 | `helm_version` | 安装 Cilium 时使用的 Helm 版本。 |
 
+## 证书有效期
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `kubeadm_certificate_validity_period` | `876000h` | kubeadm v1beta4 支持的普通证书有效期，约 100 年。Kubernetes 1.31+ 生效。 |
+| `kubeadm_ca_certificate_validity_period` | `876000h` | kubeadm v1beta4 支持的 CA 证书有效期，约 100 年。Kubernetes 1.31+ 生效。 |
+| `kubeadm_cert_renewal_enabled` | `true` | 部署完成后是否运行 kubeadm 证书续期角色。 |
+| `kubeadm_cert_renewal_days` | `36500` | 续期脚本生成证书的有效天数。 |
+| `kubeadm_cert_renewal_min_remaining_days` | `36400` | 剩余有效期低于该天数时才自动重签，避免每次部署都重启控制面组件。 |
+| `kubeadm_cert_renewal_scope` | `all` | 续期范围：`all`、`master` 或 `etcd`。 |
+| `kubeadm_cert_renewal_force` | `false` | 是否忽略剩余有效期并强制重签。 |
+| `kubeadm_cert_renewal_script_path` | `/usr/local/sbin/update-kubeadm-cert.sh` | 下发到 control-plane 节点的续期脚本路径。 |
+
+Kubernetes 1.31+ 会优先通过 kubeadm 配置把新集群证书和 CA 证书直接生成为 100 年。旧版本不支持 kubeadm v1beta4 字段时，会在部署后通过 `kubeadm_cert_renewal` 角色重签主要 kubeadm 证书；旧版本 CA 不由脚本静默替换，需要单独规划 CA 轮换。
+
 ## 网络
 
 | 变量 | 说明 |
@@ -57,6 +72,7 @@ proxy_env:
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `reset_remove_packages` | `true` | 清理时是否卸载 kubelet/kubeadm/kubectl、kubernetes-cni、cri-tools。 |
+| `reset_remove_state` | `true` | 清理时是否删除 Kubernetes、etcd、CNI、证书续期脚本等状态文件。 |
 | `reset_remove_containerd_data` | `true` | 清理时是否删除 containerd 镜像、容器和运行时数据。 |
 | `reset_remove_downloads` | `true` | 清理时是否删除下载的 CNI manifest、Helm 临时包。 |
 | `reset_remove_etc_hosts` | `true` | 是否删除 `/etc/hosts` 中 Ansible 管理的集群解析块。 |
@@ -105,13 +121,16 @@ reset_apiserver_lb_config_paths: []
 ```text
 preflight
 os_prepare
+apiserver_lb
 containerd
 kubernetes_repo
 kubernetes_packages
 control_plane
 cni
 workers
+certs
 ```
+
 # Compatibility Notes
 
 ## Kubernetes 1.35+ on cgroup v1

@@ -324,3 +324,42 @@
       tags:
         - kubeadm
         - workers
+
+- name: Renew kubeadm certificates
+  hosts: kube_control_plane
+  gather_facts: true
+  any_errors_fatal: true
+  serial: 1
+  environment: *proxy_environment
+  pre_tasks:
+    - name: Check cert renewal resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: check
+      vars:
+        resume_current_stage: certs
+      tags:
+        - certs
+        - certificates
+  roles:
+    - role: kubeadm_cert_renewal
+      when:
+        - kubeadm_cert_renewal_enabled | bool
+        - not (resume_stage_done | default(false) | bool)
+      tags:
+        - certs
+        - certificates
+  post_tasks:
+    - name: Mark cert renewal resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: mark
+      vars:
+        resume_current_stage: certs
+      when:
+        - resume_enabled | bool
+        - kubeadm_cert_renewal_enabled | bool
+        - not (resume_stage_done | default(false) | bool)
+      tags:
+        - certs
+        - certificates
