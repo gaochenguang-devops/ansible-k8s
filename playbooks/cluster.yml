@@ -1,0 +1,326 @@
+---
+- name: Validate Kubernetes cluster inputs
+  hosts: k8s_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  environment: &proxy_environment
+    http_proxy: "{{ proxy_env.http_proxy | default(proxy_env.HTTP_PROXY | default('')) }}"
+    https_proxy: "{{ proxy_env.https_proxy | default(proxy_env.HTTPS_PROXY | default('')) }}"
+    no_proxy: "{{ proxy_env.no_proxy | default(proxy_env.NO_PROXY | default('')) }}"
+    HTTP_PROXY: "{{ proxy_env.HTTP_PROXY | default(proxy_env.http_proxy | default('')) }}"
+    HTTPS_PROXY: "{{ proxy_env.HTTPS_PROXY | default(proxy_env.https_proxy | default('')) }}"
+    NO_PROXY: "{{ proxy_env.NO_PROXY | default(proxy_env.no_proxy | default('')) }}"
+  pre_tasks:
+    - name: Clear resume checkpoints when requested
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: clear
+      when:
+        - resume_enabled | bool
+        - resume_reset_state | bool
+      tags:
+        - always
+
+    - name: Check preflight resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: check
+      vars:
+        resume_current_stage: preflight
+      tags:
+        - preflight
+  roles:
+    - role: preflight
+      when: not (resume_stage_done | default(false) | bool)
+      tags:
+        - preflight
+  post_tasks:
+    - name: Mark preflight resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: mark
+      vars:
+        resume_current_stage: preflight
+      when:
+        - resume_enabled | bool
+        - not (resume_stage_done | default(false) | bool)
+      tags:
+        - preflight
+
+- name: Prepare operating systems
+  hosts: k8s_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  environment: *proxy_environment
+  pre_tasks:
+    - name: Check OS preparation resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: check
+      vars:
+        resume_current_stage: os_prepare
+      tags:
+        - os
+        - prepare
+  roles:
+    - role: os_prepare
+      when: not (resume_stage_done | default(false) | bool)
+      tags:
+        - os
+        - prepare
+  post_tasks:
+    - name: Mark OS preparation resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: mark
+      vars:
+        resume_current_stage: os_prepare
+      when:
+        - resume_enabled | bool
+        - not (resume_stage_done | default(false) | bool)
+      tags:
+        - os
+        - prepare
+
+- name: Configure apiserver load balancer
+  hosts: kube_control_plane
+  gather_facts: true
+  any_errors_fatal: true
+  environment: *proxy_environment
+  pre_tasks:
+    - name: Check apiserver LB resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: check
+      vars:
+        resume_current_stage: apiserver_lb
+      tags:
+        - lb
+        - apiserver-lb
+        - haproxy
+        - keepalived
+  roles:
+    - role: apiserver_lb
+      when: not (resume_stage_done | default(false) | bool)
+      tags:
+        - lb
+        - apiserver-lb
+        - haproxy
+        - keepalived
+  post_tasks:
+    - name: Mark apiserver LB resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: mark
+      vars:
+        resume_current_stage: apiserver_lb
+      when:
+        - resume_enabled | bool
+        - not (resume_stage_done | default(false) | bool)
+      tags:
+        - lb
+        - apiserver-lb
+        - haproxy
+        - keepalived
+
+- name: Install and configure containerd
+  hosts: k8s_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  environment: *proxy_environment
+  pre_tasks:
+    - name: Check containerd resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: check
+      vars:
+        resume_current_stage: containerd
+      tags:
+        - runtime
+        - containerd
+  roles:
+    - role: containerd
+      when: not (resume_stage_done | default(false) | bool)
+      tags:
+        - runtime
+        - containerd
+  post_tasks:
+    - name: Mark containerd resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: mark
+      vars:
+        resume_current_stage: containerd
+      when:
+        - resume_enabled | bool
+        - not (resume_stage_done | default(false) | bool)
+      tags:
+        - runtime
+        - containerd
+
+- name: Configure Kubernetes repository
+  hosts: k8s_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  environment: *proxy_environment
+  pre_tasks:
+    - name: Check Kubernetes repository resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: check
+      vars:
+        resume_current_stage: kubernetes_repo
+      tags:
+        - repo
+  roles:
+    - role: kubernetes_repo
+      when: not (resume_stage_done | default(false) | bool)
+      tags:
+        - repo
+  post_tasks:
+    - name: Mark Kubernetes repository resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: mark
+      vars:
+        resume_current_stage: kubernetes_repo
+      when:
+        - resume_enabled | bool
+        - not (resume_stage_done | default(false) | bool)
+      tags:
+        - repo
+
+- name: Install Kubernetes packages
+  hosts: k8s_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  environment: *proxy_environment
+  pre_tasks:
+    - name: Check Kubernetes packages resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: check
+      vars:
+        resume_current_stage: kubernetes_packages
+      tags:
+        - packages
+  roles:
+    - role: kubernetes_packages
+      when: not (resume_stage_done | default(false) | bool)
+      tags:
+        - packages
+  post_tasks:
+    - name: Mark Kubernetes packages resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: mark
+      vars:
+        resume_current_stage: kubernetes_packages
+      when:
+        - resume_enabled | bool
+        - not (resume_stage_done | default(false) | bool)
+      tags:
+        - packages
+
+- name: Bootstrap control plane
+  hosts: kube_control_plane
+  gather_facts: true
+  any_errors_fatal: true
+  serial: 1
+  environment: *proxy_environment
+  pre_tasks:
+    - name: Check control-plane resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: check
+      vars:
+        resume_current_stage: control_plane
+      tags:
+        - kubeadm
+        - control-plane
+  roles:
+    - role: kubeadm_control_plane
+      when: not (resume_stage_done | default(false) | bool)
+      tags:
+        - kubeadm
+        - control-plane
+  post_tasks:
+    - name: Mark control-plane resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: mark
+      vars:
+        resume_current_stage: control_plane
+      when:
+        - resume_enabled | bool
+        - not (resume_stage_done | default(false) | bool)
+      tags:
+        - kubeadm
+        - control-plane
+
+- name: Install cluster network
+  hosts: "kube_control_plane[0]"
+  gather_facts: true
+  any_errors_fatal: true
+  environment: *proxy_environment
+  pre_tasks:
+    - name: Check CNI resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: check
+      vars:
+        resume_current_stage: cni
+      tags:
+        - cni
+  roles:
+    - role: cni
+      when: not (resume_stage_done | default(false) | bool)
+      tags:
+        - cni
+  post_tasks:
+    - name: Mark CNI resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: mark
+      vars:
+        resume_current_stage: cni
+      when:
+        - resume_enabled | bool
+        - not (resume_stage_done | default(false) | bool)
+      tags:
+        - cni
+
+- name: Join worker nodes
+  hosts: kube_node
+  gather_facts: true
+  any_errors_fatal: true
+  environment: *proxy_environment
+  pre_tasks:
+    - name: Check worker resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: check
+      vars:
+        resume_current_stage: workers
+      tags:
+        - kubeadm
+        - workers
+  roles:
+    - role: kubeadm_workers
+      when: not (resume_stage_done | default(false) | bool)
+      tags:
+        - kubeadm
+        - workers
+  post_tasks:
+    - name: Mark worker resume checkpoint
+      ansible.builtin.include_role:
+        name: resume
+        tasks_from: mark
+      vars:
+        resume_current_stage: workers
+      when:
+        - resume_enabled | bool
+        - not (resume_stage_done | default(false) | bool)
+      tags:
+        - kubeadm
+        - workers

@@ -1,0 +1,79 @@
+---
+- name: Validate apiserver load balancer settings
+  ansible.builtin.assert:
+    that:
+      - apiserver_lb_proxy == 'haproxy'
+      - apiserver_lb_vip | length > 0
+      - apiserver_lb_port | int != kube_apiserver_port | int
+      - inventory_hostname in groups['kube_control_plane']
+    fail_msg: "Embedded apiserver LB requires haproxy, kube_control_plane_vip, and apiserver_lb_port different from kube_apiserver_port."
+  when: apiserver_lb_enabled | bool
+
+- name: Set effective apiserver LB facts
+  ansible.builtin.set_fact:
+    apiserver_lb_effective_interface: "{{ apiserver_lb_interface if (apiserver_lb_interface | length > 0) else ansible_default_ipv4.interface }}"
+    apiserver_lb_effective_priority: "{{ apiserver_lb_keepalived_priority_base | int - ((groups['kube_control_plane'].index(inventory_hostname) | int) * (apiserver_lb_keepalived_priority_step | int)) }}"
+  when: apiserver_lb_enabled | bool
+
+- name: Install apiserver LB packages
+  ansible.builtin.package:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - haproxy
+    - keepalived
+  when: apiserver_lb_enabled | bool
+
+- name: Ensure HAProxy runtime directory exists
+  ansible.builtin.file:
+    path: /var/lib/haproxy
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: apiserver_lb_enabled | bool
+
+- name: Configure HAProxy for kube-apiserver
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    mode: "0644"
+  notify: Restart haproxy
+  when: apiserver_lb_enabled | bool
+
+- name: Configure Keepalived for kube-apiserver VIP
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    mode: "0644"
+  notify: Restart keepalived
+  when: apiserver_lb_enabled | bool
+
+- name: Enable and start HAProxy
+  ansible.builtin.systemd:
+    name: haproxy
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: apiserver_lb_enabled | bool
+
+- name: Enable and start Keepalived
+  ansible.builtin.systemd:
+    name: keepalived
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: apiserver_lb_enabled | bool
+
+- name: Apply apiserver LB config changes before VIP check
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for apiserver VIP to appear on one control-plane node
+  ansible.builtin.command: "ip addr show to {{ apiserver_lb_vip }}/{{ apiserver_lb_vip_prefix }}"
+  register: apiserver_lb_vip_check
+  changed_when: false
+  retries: 15
+  delay: 2
+  until: apiserver_lb_vip_check.rc == 0
+  run_once: true
+  when: apiserver_lb_enabled | bool

@@ -1,0 +1,21 @@
+---
+- name: Check resume state directory
+  ansible.builtin.stat:
+    path: "{{ resume_state_dir }}/{{ resume_cluster_key }}"
+  register: resume_state_directory
+  delegate_to: localhost
+  become: false
+
+- name: Find resume markers for this cluster
+  ansible.builtin.find:
+    paths: "{{ resume_state_dir }}/{{ resume_cluster_key }}"
+    patterns: "*.done"
+    file_type: file
+  register: resume_status_markers
+  delegate_to: localhost
+  become: false
+  when: resume_state_directory.stat.exists
+
+- name: Print resume markers
+  ansible.builtin.debug:
+    msg: "{{ (resume_status_markers.files if resume_status_markers is defined else []) | map(attribute='path') | list }}"

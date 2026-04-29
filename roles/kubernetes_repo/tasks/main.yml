@@ -1,0 +1,50 @@
+---
+- name: Ensure apt keyring directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  when: ansible_os_family == 'Debian'
+
+- name: Download Kubernetes apt release key
+  ansible.builtin.get_url:
+    url: "{{ kubernetes_apt_release_key_url }}"
+    dest: "/tmp/kubernetes-v{{ effective_kube_repo_minor_version }}-Release.key"
+    mode: "0644"
+  when: ansible_os_family == 'Debian'
+
+- name: Install Kubernetes apt keyring
+  ansible.builtin.command: "gpg --dearmor -o /etc/apt/keyrings/kubernetes-v{{ effective_kube_repo_minor_version }}-apt-keyring.gpg /tmp/kubernetes-v{{ effective_kube_repo_minor_version }}-Release.key"
+  args:
+    creates: "/etc/apt/keyrings/kubernetes-v{{ effective_kube_repo_minor_version }}-apt-keyring.gpg"
+  when: ansible_os_family == 'Debian'
+
+- name: Configure Kubernetes apt repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/kubernetes.list
+    mode: "0644"
+    content: |
+      deb [signed-by=/etc/apt/keyrings/kubernetes-v{{ effective_kube_repo_minor_version }}-apt-keyring.gpg] {{ kubernetes_apt_repo_url }} /
+  when: ansible_os_family == 'Debian'
+
+- name: Ensure yum repository directory exists
+  ansible.builtin.file:
+    path: /etc/yum.repos.d
+    state: directory
+    mode: "0755"
+  when: ansible_os_family == 'RedHat'
+
+- name: Configure Kubernetes RPM repository
+  ansible.builtin.copy:
+    dest: /etc/yum.repos.d/kubernetes.repo
+    mode: "0644"
+    content: |
+      [kubernetes]
+      name=Kubernetes
+      baseurl={{ kubernetes_rpm_repo_url }}
+      enabled=1
+      gpgcheck={{ 1 if kubernetes_rpm_gpgcheck | bool else 0 }}
+      repo_gpgcheck={{ 1 if kubernetes_rpm_repo_gpgcheck | bool else 0 }}
+      gpgkey={{ kubernetes_rpm_gpg_key_url }}
+      exclude={{ kubernetes_rpm_excludes | join(' ') }}
+  when: ansible_os_family == 'RedHat'

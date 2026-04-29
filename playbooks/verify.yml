@@ -1,0 +1,16 @@
+---
+- name: Verify Kubernetes cluster health
+  hosts: "kube_control_plane[0]"
+  gather_facts: false
+  any_errors_fatal: true
+  environment:
+    http_proxy: "{{ proxy_env.http_proxy | default(proxy_env.HTTP_PROXY | default('')) }}"
+    https_proxy: "{{ proxy_env.https_proxy | default(proxy_env.HTTPS_PROXY | default('')) }}"
+    no_proxy: "{{ proxy_env.no_proxy | default(proxy_env.NO_PROXY | default('')) }}"
+    HTTP_PROXY: "{{ proxy_env.HTTP_PROXY | default(proxy_env.http_proxy | default('')) }}"
+    HTTPS_PROXY: "{{ proxy_env.HTTPS_PROXY | default(proxy_env.https_proxy | default('')) }}"
+    NO_PROXY: "{{ proxy_env.NO_PROXY | default(proxy_env.no_proxy | default('')) }}"
+  roles:
+    - role: verify_cluster
+      tags:
+        - verify

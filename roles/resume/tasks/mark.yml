@@ -1,0 +1,24 @@
+---
+- name: Ensure resume state directory exists
+  ansible.builtin.file:
+    path: "{{ resume_state_dir }}/{{ resume_cluster_key }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: resume_enabled | default(false) | bool
+
+- name: Mark resume stage as complete
+  ansible.builtin.copy:
+    dest: "{{ resume_state_dir }}/{{ resume_cluster_key }}/{{ resume_current_stage }}.done"
+    mode: "0644"
+    content: |
+      stage: {{ resume_current_stage }}
+      cluster_name: {{ cluster_name }}
+      marked_at: {{ ansible_date_time.iso8601 | default('unknown') }}
+      inventory: {{ inventory_file | default('unknown') }}
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: resume_enabled | default(false) | bool

@@ -1,0 +1,52 @@
+---
+- name: Check if worker node already joined
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubeadm_worker_kubelet_conf
+
+- name: Check existing worker kubeconfig files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ kubeadm_worker_kubeconfig_update_paths }}"
+  register: kubeadm_worker_kubeconfig_files
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_update_kubeconfigs_to_control_plane_endpoint | bool
+    - kubeadm_worker_kubelet_conf.stat.exists
+
+- name: Point existing worker kubeconfigs to the configured endpoint
+  ansible.builtin.replace:
+    path: "{{ item.item }}"
+    regexp: 'server: https://[^\r\n]+'
+    replace: "server: https://{{ kube_control_plane_endpoint }}"
+  loop: "{{ kubeadm_worker_kubeconfig_files.results | default([]) }}"
+  register: kubeadm_worker_kubeconfig_endpoint_update
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_update_kubeconfigs_to_control_plane_endpoint | bool
+    - kubeadm_worker_kubelet_conf.stat.exists
+    - item.stat.exists
+
+- name: Restart kubelet after worker kubeconfig endpoint update
+  ansible.builtin.systemd:
+    name: kubelet
+    state: restarted
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_update_kubeconfigs_to_control_plane_endpoint | bool
+    - kubeadm_worker_kubeconfig_endpoint_update is changed
+
+- name: Create worker join command when needed
+  ansible.builtin.command: kubeadm token create --print-join-command
+  register: kubeadm_worker_join_result
+  changed_when: false
+  delegate_to: "{{ groups['kube_control_plane'][0] }}"
+  when: not kubeadm_worker_kubelet_conf.stat.exists
+
+- name: Join worker node
+  ansible.builtin.command: >
+    {{ kubeadm_worker_join_result.stdout | regex_replace('^(kubeadm join)\\s+\\S+', '\\1 ' ~ kube_control_plane_endpoint) }}
+    --cri-socket {{ cri_socket }}
+    {{ '--ignore-preflight-errors=' + (kubeadm_effective_ignore_preflight_errors | join(',')) if (kubeadm_effective_ignore_preflight_errors | length > 0) else '' }}
+    {{ kubeadm_join_extra_args | join(' ') }}
+  when: not kubeadm_worker_kubelet_conf.stat.exists

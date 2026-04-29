@@ -1,0 +1,277 @@
+---
+- name: Check if this control-plane node is already initialized
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: kubeadm_admin_conf
+
+- name: Build kubeadm optional arguments
+  ansible.builtin.set_fact:
+    kubeadm_ignore_preflight_arg: "{{ '--ignore-preflight-errors=' + (kubeadm_effective_ignore_preflight_errors | join(',')) if (kubeadm_effective_ignore_preflight_errors | length > 0) else '' }}"
+
+- name: Ensure kubeadm config directory exists
+  ansible.builtin.file:
+    path: "{{ kubeadm_config_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Render kubeadm init config
+  ansible.builtin.template:
+    src: kubeadm-init-config.yaml.j2
+    dest: "{{ kubeadm_config_dir }}/init-config.yaml"
+    mode: "0644"
+
+- name: Initialize the first control-plane node
+  ansible.builtin.command: >
+    kubeadm init
+    --config {{ kubeadm_config_dir }}/init-config.yaml
+    --upload-certs
+    {{ kubeadm_ignore_preflight_arg }}
+    {{ kubeadm_init_extra_args | join(' ') }}
+  args:
+    creates: /etc/kubernetes/admin.conf
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+    - not kubeadm_admin_conf.stat.exists
+
+- name: Ensure kubeconfig directory exists
+  ansible.builtin.file:
+    path: "{{ kubeconfig_home }}/.kube"
+    state: directory
+    owner: "{{ kubeconfig_owner }}"
+    group: "{{ kubeconfig_group }}"
+    mode: "0700"
+  when: inventory_hostname == groups['kube_control_plane'][0]
+
+- name: Copy admin kubeconfig
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: "{{ kubeconfig_home }}/.kube/config"
+    remote_src: true
+    owner: "{{ kubeconfig_owner }}"
+    group: "{{ kubeconfig_group }}"
+    mode: "0600"
+  when: inventory_hostname == groups['kube_control_plane'][0]
+
+- name: Read kubeadm ClusterConfiguration
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ kubeconfig_path }}"
+      - -n
+      - kube-system
+      - get
+      - configmap
+      - kubeadm-config
+      - -o
+      - "jsonpath={.data.ClusterConfiguration}"
+  register: kubeadm_cluster_configuration_raw
+  changed_when: false
+  failed_when: false
+  run_once: true
+  delegate_to: "{{ groups['kube_control_plane'][0] }}"
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_migrate_existing_control_plane_endpoint | bool
+
+- name: Build migrated kubeadm ClusterConfiguration
+  ansible.builtin.set_fact:
+    kubeadm_cluster_configuration_current: "{{ kubeadm_cluster_configuration_raw.stdout | from_yaml }}"
+    kubeadm_cluster_configuration_migrated: "{{ (kubeadm_cluster_configuration_raw.stdout | from_yaml) | combine({'controlPlaneEndpoint': kube_control_plane_endpoint}, recursive=True) }}"
+  run_once: true
+  delegate_to: "{{ groups['kube_control_plane'][0] }}"
+  delegate_facts: true
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_migrate_existing_control_plane_endpoint | bool
+    - kubeadm_cluster_configuration_raw.rc == 0
+    - kubeadm_cluster_configuration_raw.stdout | length > 0
+
+- name: Migrate kubeadm controlPlaneEndpoint
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ kubeconfig_path }}"
+      - -n
+      - kube-system
+      - patch
+      - configmap
+      - kubeadm-config
+      - --type
+      - merge
+      - -p
+      - "{{ {'data': {'ClusterConfiguration': (hostvars[groups['kube_control_plane'][0]].kubeadm_cluster_configuration_migrated | to_nice_yaml(indent=2))}} | to_json }}"
+  run_once: true
+  delegate_to: "{{ groups['kube_control_plane'][0] }}"
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_migrate_existing_control_plane_endpoint | bool
+    - hostvars[groups['kube_control_plane'][0]].kubeadm_cluster_configuration_current is defined
+    - hostvars[groups['kube_control_plane'][0]].kubeadm_cluster_configuration_current.controlPlaneEndpoint | default('') != kube_control_plane_endpoint
+
+- name: Check local apiserver cert
+  ansible.builtin.stat:
+    path: /etc/kubernetes/pki/apiserver.crt
+  register: kubeadm_apiserver_cert
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_rotate_apiserver_cert_for_endpoint | bool
+
+- name: Check whether local apiserver cert contains the endpoint host
+  ansible.builtin.shell: |
+    set -o pipefail
+    openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -text | grep -F {{ kube_control_plane_endpoint_host | quote }}
+  args:
+    executable: /bin/bash
+  register: kubeadm_apiserver_cert_endpoint_check
+  changed_when: false
+  failed_when: false
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_rotate_apiserver_cert_for_endpoint | bool
+    - kubeadm_apiserver_cert.stat.exists
+
+- name: Backup apiserver cert before endpoint migration
+  ansible.builtin.shell: |
+    set -e
+    ts=$(date +%Y%m%d%H%M%S)
+    cp -a /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.crt.pre-endpoint-${ts}
+    cp -a /etc/kubernetes/pki/apiserver.key /etc/kubernetes/pki/apiserver.key.pre-endpoint-${ts}
+  args:
+    executable: /bin/bash
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_rotate_apiserver_cert_for_endpoint | bool
+    - kubeadm_apiserver_cert_endpoint_check is defined
+    - kubeadm_apiserver_cert_endpoint_check.rc is defined
+    - kubeadm_apiserver_cert_endpoint_check.rc != 0
+
+- name: Remove apiserver cert before endpoint migration
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/kubernetes/pki/apiserver.crt
+    - /etc/kubernetes/pki/apiserver.key
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_rotate_apiserver_cert_for_endpoint | bool
+    - kubeadm_apiserver_cert_endpoint_check is defined
+    - kubeadm_apiserver_cert_endpoint_check.rc is defined
+    - kubeadm_apiserver_cert_endpoint_check.rc != 0
+
+- name: Regenerate apiserver cert with endpoint SAN
+  ansible.builtin.command: "kubeadm init phase certs apiserver --config {{ kubeadm_config_dir }}/init-config.yaml"
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_rotate_apiserver_cert_for_endpoint | bool
+    - kubeadm_apiserver_cert_endpoint_check is defined
+    - kubeadm_apiserver_cert_endpoint_check.rc is defined
+    - kubeadm_apiserver_cert_endpoint_check.rc != 0
+
+- name: Restart kube-apiserver static pod after cert endpoint migration
+  ansible.builtin.shell: |
+    set +e
+    crictl --runtime-endpoint {{ cri_socket }} ps --name kube-apiserver -q \
+      | xargs -r crictl --runtime-endpoint {{ cri_socket }} stop
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_rotate_apiserver_cert_for_endpoint | bool
+    - kubeadm_apiserver_cert_endpoint_check is defined
+    - kubeadm_apiserver_cert_endpoint_check.rc is defined
+    - kubeadm_apiserver_cert_endpoint_check.rc != 0
+
+- name: Wait for Kubernetes API after endpoint migration
+  ansible.builtin.command: "kubectl --kubeconfig {{ kubeconfig_path }} get --raw=/readyz"
+  register: kubeadm_endpoint_api_ready
+  changed_when: false
+  retries: 30
+  delay: 5
+  until: kubeadm_endpoint_api_ready.rc == 0
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_rotate_apiserver_cert_for_endpoint | bool
+    - kubeadm_apiserver_cert_endpoint_check is defined
+    - kubeadm_apiserver_cert_endpoint_check.rc is defined
+    - kubeadm_apiserver_cert_endpoint_check.rc != 0
+
+- name: Upload control-plane certificates and capture key
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -n 1
+  args:
+    executable: /bin/bash
+  register: kubeadm_certificate_key_result
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ groups['kube_control_plane'][0] }}"
+
+- name: Create worker join command
+  ansible.builtin.command: kubeadm token create --print-join-command
+  register: kubeadm_worker_join_result
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ groups['kube_control_plane'][0] }}"
+
+- name: Publish join data on the first control-plane host
+  ansible.builtin.set_fact:
+    kubeadm_certificate_key: "{{ kubeadm_certificate_key_result.stdout }}"
+    kubeadm_worker_join_command: "{{ kubeadm_worker_join_result.stdout | regex_replace('^(kubeadm join)\\s+\\S+', '\\1 ' ~ kube_control_plane_endpoint) }}"
+  run_once: true
+  delegate_to: "{{ groups['kube_control_plane'][0] }}"
+  delegate_facts: true
+
+- name: Check if this secondary control-plane node already joined
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubeadm_kubelet_conf
+  when: inventory_hostname != groups['kube_control_plane'][0]
+
+- name: Join secondary control-plane nodes
+  ansible.builtin.command: >
+    {{ hostvars[groups['kube_control_plane'][0]].kubeadm_worker_join_command }}
+    --control-plane
+    --certificate-key {{ hostvars[groups['kube_control_plane'][0]].kubeadm_certificate_key }}
+    --apiserver-advertise-address {{ node_ip | default(ansible_default_ipv4.address) }}
+    --cri-socket {{ cri_socket }}
+    {{ kubeadm_ignore_preflight_arg }}
+    {{ kubeadm_join_extra_args | join(' ') }}
+  when:
+    - inventory_hostname != groups['kube_control_plane'][0]
+    - not kubeadm_kubelet_conf.stat.exists
+  throttle: 1
+
+- name: Check local control-plane kubeconfig files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ kubeadm_control_plane_kubeconfig_update_paths }}"
+  register: kubeadm_control_plane_kubeconfig_files
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_update_kubeconfigs_to_control_plane_endpoint | bool
+
+- name: Point control-plane kubeconfigs to the configured endpoint
+  ansible.builtin.replace:
+    path: "{{ item.item }}"
+    regexp: 'server: https://[^\r\n]+'
+    replace: "server: https://{{ kube_control_plane_endpoint }}"
+  loop: "{{ kubeadm_control_plane_kubeconfig_files.results | default([]) }}"
+  register: kubeadm_control_plane_kubeconfig_endpoint_update
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_update_kubeconfigs_to_control_plane_endpoint | bool
+    - item.stat.exists
+
+- name: Restart kubelet after control-plane kubelet kubeconfig endpoint update
+  ansible.builtin.systemd:
+    name: kubelet
+    state: restarted
+  when:
+    - apiserver_lb_enabled | bool
+    - kubeadm_update_kubeconfigs_to_control_plane_endpoint | bool
+    - kubeadm_control_plane_kubeconfig_endpoint_update is changed

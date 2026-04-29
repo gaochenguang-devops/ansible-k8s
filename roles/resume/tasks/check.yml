@@ -1,0 +1,26 @@
+---
+- name: Validate resume stage name
+  ansible.builtin.assert:
+    that:
+      - resume_current_stage is defined
+      - resume_current_stage | length > 0
+    fail_msg: "resume_current_stage must be set before using the resume role."
+  when: resume_enabled | default(false) | bool
+
+- name: Check resume marker
+  ansible.builtin.stat:
+    path: "{{ resume_state_dir }}/{{ resume_cluster_key }}/{{ resume_current_stage }}.done"
+  register: resume_marker
+  delegate_to: localhost
+  become: false
+  when: resume_enabled | default(false) | bool
+
+- name: Store resume stage state
+  ansible.builtin.set_fact:
+    resume_stage_done: "{{ (resume_enabled | default(false) | bool) and (resume_marker.stat.exists | default(false)) and resume_current_stage not in (resume_force_stages | default([])) }}"
+    resume_stage_marker_file: "{{ resume_state_dir }}/{{ resume_cluster_key }}/{{ resume_current_stage }}.done"
+
+- name: Show skipped resume stage
+  ansible.builtin.debug:
+    msg: "Resume checkpoint found, skipping stage '{{ resume_current_stage }}'. Marker: {{ resume_stage_marker_file }}"
+  when: resume_stage_done | bool

@@ -1,0 +1,262 @@
+---
+# Kubernetes package selection.
+# Set kube_version to an exact patch version for reproducible installs.
+# Set kube_version to "" to install the newest patch from kube_repo_minor_version.
+kube_version: "1.36.0"
+kube_repo_minor_version: "1.36"
+effective_kube_repo_minor_version: "{{ (kube_version.split('.')[0:2] | join('.')) if (kube_version | string | length > 0) else kube_repo_minor_version }}"
+kube_effective_semver_for_checks: "{{ kube_version if (kube_version | string | length > 0) else kube_repo_minor_version + '.0' }}"
+kube_package_version: ""
+kube_hold_packages: true
+kube_image_repository: "registry.k8s.io"
+kubernetes_repo_base_url: "https://pkgs.k8s.io/core:/stable:/v{{ effective_kube_repo_minor_version }}"
+kubernetes_apt_release_key_url: "{{ kubernetes_repo_base_url }}/deb/Release.key"
+kubernetes_apt_repo_url: "{{ kubernetes_repo_base_url }}/deb/"
+kubernetes_rpm_repo_url: "{{ kubernetes_repo_base_url }}/rpm/"
+kubernetes_rpm_gpg_key_url: "{{ kubernetes_rpm_repo_url }}repodata/repomd.xml.key"
+kubernetes_rpm_repo_gpgcheck: true
+kubernetes_rpm_gpgcheck: true
+kubernetes_rpm_excludes:
+  - kubelet
+  - kubeadm
+  - kubectl
+  - cri-tools
+  - kubernetes-cni
+
+# Cluster addressing.
+cluster_name: ansible-k8s
+kube_apiserver_port: 6443
+kube_control_plane_vip: "192.168.200.181"
+apiserver_lb_enabled: "{{ (groups['kube_control_plane'] | default([]) | length) > 1 }}"
+apiserver_lb_proxy: "haproxy"
+apiserver_lb_vip: "{{ kube_control_plane_vip }}"
+apiserver_lb_port: 16443
+apiserver_lb_interface: ""
+apiserver_lb_vip_prefix: 32
+apiserver_lb_keepalived_vrid: 51
+apiserver_lb_keepalived_auth_pass: "k8sha"
+apiserver_lb_keepalived_advert_int: 1
+apiserver_lb_keepalived_priority_base: 120
+apiserver_lb_keepalived_priority_step: 10
+apiserver_lb_keepalived_unicast: false
+apiserver_lb_keepalived_nopreempt: false
+apiserver_lb_haproxy_stats_enabled: false
+apiserver_lb_haproxy_stats_port: 8404
+apiserver_lb_haproxy_balance: "roundrobin"
+apiserver_lb_excluded_backends: []
+kube_first_control_plane_endpoint_host: "{{ hostvars[groups['kube_control_plane'][0]].ansible_host | default(hostvars[groups['kube_control_plane'][0]].node_ip | default(groups['kube_control_plane'][0])) }}"
+kube_control_plane_endpoint_host: "{{ apiserver_lb_vip if (apiserver_lb_enabled | bool) else kube_first_control_plane_endpoint_host }}"
+kube_control_plane_endpoint_port: "{{ apiserver_lb_port if apiserver_lb_enabled | bool else kube_apiserver_port }}"
+kube_control_plane_endpoint: "{{ kube_control_plane_endpoint_host }}:{{ kube_control_plane_endpoint_port }}"
+pod_network_cidr: "10.244.0.0/16"
+service_cidr: "10.96.0.0/12"
+kube_dns_domain: "cluster.local"
+
+# kubeadm / kubelet.
+cri_socket: "unix:///run/containerd/containerd.sock"
+kubeadm_ignore_preflight_errors: []
+kubeadm_effective_ignore_preflight_errors: "{{ (kubeadm_ignore_preflight_errors + (['SystemVerification'] if allow_legacy_cgroup_v1 | bool else [])) | unique }}"
+kubeadm_init_extra_args: []
+kubeadm_join_extra_args: []
+kubeadm_config_dir: "/etc/kubernetes/kubeadm"
+kubeadm_config_api_version: "{{ 'kubeadm.k8s.io/v1beta4' if kube_effective_semver_for_checks is version('1.31.0', '>=') else 'kubeadm.k8s.io/v1beta3' }}"
+kubeadm_migrate_existing_control_plane_endpoint: true
+kubeadm_rotate_apiserver_cert_for_endpoint: true
+kubeadm_update_kubeconfigs_to_control_plane_endpoint: true
+kubeadm_control_plane_kubeconfig_update_paths:
+  - /etc/kubernetes/admin.conf
+  - /etc/kubernetes/super-admin.conf
+  - /etc/kubernetes/kubelet.conf
+  - "{{ kubeconfig_home }}/.kube/config"
+kubeadm_worker_kubeconfig_update_paths:
+  - /etc/kubernetes/kubelet.conf
+kubelet_cgroup_driver: "systemd"
+allow_legacy_cgroup_v1: true
+kubelet_fail_cgroup_v1: "{{ not allow_legacy_cgroup_v1 | bool }}"
+kubeconfig_path: "/etc/kubernetes/admin.conf"
+kubeconfig_owner: "root"
+kubeconfig_group: "root"
+kubeconfig_home: "/root"
+
+# CNI: calico, flannel, or cilium.
+cni_plugin: "calico"
+calico_version: "3.31.5"
+calico_manifest_url: "https://raw.githubusercontent.com/projectcalico/calico/v{{ calico_version }}/manifests/calico.yaml"
+flannel_version: "0.28.2"
+flannel_manifest_url: "https://raw.githubusercontent.com/flannel-io/flannel/v{{ flannel_version }}/Documentation/kube-flannel.yml"
+cilium_version: "1.19.3"
+cilium_kube_proxy_replacement: false
+cilium_force_upgrade: false
+cilium_min_kernel: "5.10.0"
+cilium_wait: true
+cilium_wait_timeout: "10m"
+cilium_helm_repo_url: "https://helm.cilium.io"
+cilium_extra_helm_args: []
+
+# Runtime.
+container_runtime: "containerd"
+containerd_package_version: ""
+containerd_sandbox_image: "registry.k8s.io/pause:3.10"
+containerd_manage_upstream_repo: true
+containerd_registry_mirrors: {}
+docker_apt_gpg_url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+docker_apt_repo_url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}"
+docker_apt_codename: "{{ ansible_distribution_release }}"
+docker_rpm_repo_url: "https://download.docker.com/linux/centos/{{ ansible_distribution_major_version }}/$basearch/stable"
+docker_rpm_gpg_key_url: "https://download.docker.com/linux/centos/gpg"
+
+# Optional OS preparation.
+disable_swap: true
+manage_selinux: true
+disable_firewalld: true
+manage_etc_hosts: true
+manage_hostname: true
+system_timezone: ""
+proxy_env: {}
+
+# Checkpoint-based resume. Normal cluster.yml keeps this disabled by default.
+resume_enabled: false
+resume_state_dir: "{{ playbook_dir }}/../.ansible/resume"
+resume_cluster_key: "{{ cluster_name | regex_replace('[^A-Za-z0-9_.-]', '_') }}"
+resume_force_stages: []
+resume_reset_state: false
+resume_clear_on_reset: true
+
+# Reset behavior. Defaults favor a thorough cluster cleanup while keeping
+# containerd/LB packages installed so a redeploy can reinstall configs quickly.
+reset_remove_packages: true
+reset_remove_containerd_data: true
+reset_remove_downloads: true
+reset_remove_etc_hosts: true
+reset_flush_iptables: true
+reset_flush_ip6tables: true
+reset_flush_nftables: false
+reset_start_containerd_after_reset: true
+reset_stop_apiserver_lb: true
+reset_remove_apiserver_lb_config: true
+reset_remove_apiserver_lb_packages: false
+reset_remove_kubernetes_repo: true
+reset_remove_containerd_repo: false
+reset_remove_containerd_config: true
+reset_remove_containerd_package: false
+reset_remove_kubelet_config: true
+reset_remove_cni_binaries: false
+reset_remove_pod_logs: true
+reset_remove_network_links: true
+reset_remove_os_tuning: true
+reset_kubernetes_state_paths:
+  - /etc/kubernetes
+  - /var/lib/etcd
+  - /var/lib/kubelet
+  - /var/lib/kube-proxy
+  - /var/lib/cni
+  - /etc/cni/net.d
+  - /etc/cni
+  - /run/kubernetes
+  - /var/run/kubernetes
+  - /run/flannel
+  - /var/run/flannel
+  - /var/lib/flannel
+  - /run/calico
+  - /var/run/calico
+  - /var/lib/calico
+  - /var/log/calico
+  - /run/cilium
+  - /var/run/cilium
+  - /var/lib/cilium
+  - /var/lib/tigera
+  - "{{ kubeconfig_home }}/.kube/config"
+reset_kubelet_config_paths:
+  - /etc/default/kubelet
+  - /etc/sysconfig/kubelet
+  - /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+reset_containerd_config_paths:
+  - /etc/containerd/config.toml
+  - /etc/crictl.yaml
+reset_pod_log_paths:
+  - /var/log/pods
+  - /var/log/containers
+reset_os_tuning_paths:
+  - /etc/modules-load.d/k8s.conf
+  - /etc/sysctl.d/99-kubernetes-cri.conf
+reset_apiserver_lb_config_paths:
+  - /etc/haproxy/haproxy.cfg
+  - /etc/keepalived/keepalived.conf
+  - /var/lib/haproxy
+  - /run/haproxy.pid
+  - /var/run/haproxy.pid
+reset_kubernetes_repo_paths_debian:
+  - /etc/apt/sources.list.d/kubernetes.list
+reset_kubernetes_repo_paths_redhat:
+  - /etc/yum.repos.d/kubernetes.repo
+reset_containerd_repo_paths_debian:
+  - /etc/apt/sources.list.d/docker.list
+  - /etc/apt/keyrings/docker.asc
+reset_containerd_repo_paths_redhat:
+  - /etc/yum.repos.d/docker-ce-stable.repo
+reset_network_link_name_regex: "^(cni0|flannel\\.1|cilium_host|cilium_net|cilium_vxlan|vxlan\\.calico|tunl0|kube-ipvs0|cali[a-fA-F0-9]+|lxc[a-fA-F0-9]+)$"
+
+# Scale down / node removal.
+remove_nodes: []
+remove_node_targets: "{{ remove_nodes if (remove_nodes is sequence and remove_nodes is not string) else (remove_nodes.split(',') | map('trim') | reject('equalto', '') | list) }}"
+remove_node_drain: true
+remove_node_drain_timeout: "10m"
+remove_node_force: true
+remove_node_ignore_daemonsets: true
+remove_node_delete_emptydir_data: true
+remove_node_reset: true
+remove_node_delete_from_cluster: true
+remove_node_ignore_missing: true
+
+# Downloaded/generated manifests on the first control-plane node.
+kube_manifest_dir: "/opt/k8s/manifests"
+
+# Verification timeouts.
+verify_node_ready_timeout: "5m"
+verify_system_rollout_timeout: "5m"
+
+supported_cni_plugins:
+  - calico
+  - flannel
+  - cilium
+
+supported_distributions:
+  - Ubuntu
+  - Debian
+  - CentOS
+  - Rocky
+  - AlmaLinux
+  - RedHat
+  - OracleLinux
+  - openEuler
+
+common_packages_debian:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gpg
+  - conntrack
+  - socat
+  - ipset
+  - iproute2
+  - ebtables
+
+common_packages_redhat:
+  - ca-certificates
+  - curl
+  - gnupg2
+  - conntrack-tools
+  - socat
+  - ipset
+  # - iproute-tc
+  - ebtables
+
+arch_map:
+  x86_64: amd64
+  amd64: amd64
+  aarch64: arm64
+  arm64: arm64
+
+helm_version: "3.15.4"
+helm_download_base_url: "https://get.helm.sh"
+helm_download_url: "{{ helm_download_base_url }}/helm-v{{ helm_version }}-linux-{{ helm_arch }}.tar.gz"

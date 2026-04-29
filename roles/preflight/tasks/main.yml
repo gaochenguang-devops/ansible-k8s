@@ -1,0 +1,105 @@
+---
+- name: Validate inventory groups
+  ansible.builtin.assert:
+    that:
+      - groups['kube_control_plane'] is defined
+      - groups['kube_control_plane'] | length > 0
+      - groups['k8s_cluster'] is defined
+      - groups['k8s_cluster'] | length > 0
+    fail_msg: "Inventory must define kube_control_plane and k8s_cluster groups."
+
+- name: Validate control-plane endpoint for HA
+  ansible.builtin.assert:
+    that:
+      - groups['kube_control_plane'] | length == 1 or kube_control_plane_vip | length > 0
+    fail_msg: "Set kube_control_plane_vip or a stable load balancer DNS/IP when using multiple control-plane nodes."
+  run_once: true
+
+- name: Validate single control-plane VIP usage
+  ansible.builtin.assert:
+    that:
+      - groups['kube_control_plane'] | length > 1 or kube_control_plane_vip | length == 0 or apiserver_lb_enabled | bool
+    fail_msg: >-
+      Single control-plane clusters do not use kube_control_plane_vip by default. Set
+      kube_control_plane_vip: "" for a normal single-master cluster. If you intentionally
+      want a VIP on one master, also set apiserver_lb_enabled: true so Keepalived and
+      HAProxy are deployed and kubeadm uses VIP:{{ apiserver_lb_port }}.
+  run_once: true
+
+- name: Validate embedded apiserver load balancer settings
+  ansible.builtin.assert:
+    that:
+      - not apiserver_lb_enabled | bool or kube_control_plane_vip | length > 0
+      - not apiserver_lb_enabled | bool or apiserver_lb_proxy == 'haproxy'
+      - not apiserver_lb_enabled | bool or apiserver_lb_port | int != kube_apiserver_port | int
+      - not apiserver_lb_enabled | bool or apiserver_lb_keepalived_auth_pass | length <= 8
+    fail_msg: "Embedded apiserver LB needs kube_control_plane_vip, haproxy, apiserver_lb_port != kube_apiserver_port, and keepalived auth_pass <= 8 chars."
+  run_once: true
+
+- name: Validate supported operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution in supported_distributions or ansible_os_family in ['Debian', 'RedHat']
+    fail_msg: "{{ ansible_distribution }} / {{ ansible_os_family }} is not in the supported OS list. Add package mappings before using it."
+
+- name: Validate Kubernetes version inputs
+  ansible.builtin.assert:
+    that:
+      - effective_kube_repo_minor_version is match('^[0-9]+\\.[0-9]+$')
+      - kube_version | string | length == 0 or kube_version is match('^[0-9]+\\.[0-9]+\\.[0-9]+$')
+      - kube_version | string | length == 0 or kube_version is version('1.24.0', '>=')
+    fail_msg: "Use kube_version like 1.36.0, or set it to an empty string and choose kube_repo_minor_version like 1.36."
+
+- name: Detect cgroup filesystem
+  ansible.builtin.command: stat -fc %T /sys/fs/cgroup
+  register: cgroup_fs_type
+  changed_when: false
+
+- name: Validate Kubernetes and cgroup v1 compatibility
+  ansible.builtin.assert:
+    that:
+      - kube_effective_semver_for_checks is version('1.35.0', '<') or cgroup_fs_type.stdout == 'cgroup2fs' or allow_legacy_cgroup_v1 | bool
+    fail_msg: >-
+      Kubernetes {{ kube_effective_semver_for_checks }} fails preflight on cgroup v1 by default. {{ inventory_hostname }}
+      is using {{ cgroup_fs_type.stdout }} with kernel {{ ansible_kernel }}. Prefer upgrading the OS/kernel
+      to cgroup v2, or downgrade Kubernetes below 1.35. To force legacy cgroup v1, set
+      allow_legacy_cgroup_v1: true; the playbook will set kubelet failCgroupV1=false and add
+      SystemVerification to kubeadm ignore-preflight-errors.
+
+- name: Validate CNI selection
+  ansible.builtin.assert:
+    that:
+      - cni_plugin in supported_cni_plugins
+    fail_msg: "cni_plugin must be one of {{ supported_cni_plugins | join(', ') }}."
+
+- name: Validate container runtime selection
+  ansible.builtin.assert:
+    that:
+      - container_runtime == 'containerd'
+    fail_msg: "Only containerd is implemented by this playbook set."
+
+- name: Validate Docker upstream repo support for containerd
+  ansible.builtin.assert:
+    that:
+      - not containerd_manage_upstream_repo | bool or ansible_os_family == 'RedHat' or ansible_distribution in ['Ubuntu', 'Debian']
+    fail_msg: "containerd_manage_upstream_repo only supports RedHat family, Ubuntu, and Debian. Set it to false for {{ ansible_distribution }}."
+
+- name: Validate node IP is known
+  ansible.builtin.assert:
+    that:
+      - (node_ip | default(ansible_default_ipv4.address | default(''))) | length > 0
+    fail_msg: "Set node_ip for {{ inventory_hostname }} or ensure ansible_default_ipv4 is available."
+
+- name: Validate architecture for bundled downloads
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in arch_map
+    fail_msg: "{{ ansible_architecture }} is not mapped in arch_map."
+  when: cni_plugin == 'cilium' or (containerd_manage_upstream_repo | bool and ansible_distribution in ['Ubuntu', 'Debian'])
+
+- name: Validate Cilium kernel floor
+  ansible.builtin.assert:
+    that:
+      - ansible_kernel is version(cilium_min_kernel, '>=')
+    fail_msg: "Cilium {{ cilium_version }} expects Linux kernel >= {{ cilium_min_kernel }}; {{ inventory_hostname }} is running {{ ansible_kernel }}."
+  when: cni_plugin == 'cilium'

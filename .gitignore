@@ -1,0 +1,6 @@
+*.retry
+.ansible/
+.vault-pass
+inventory/*/host_vars/
+inventory/*/group_vars/
+!inventory/sample/

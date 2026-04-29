@@ -1,0 +1,36 @@
+vrrp_script chk_apiserver_lb {
+    script "pidof haproxy"
+    interval 2
+    fall 2
+    rise 2
+    weight -20
+}
+
+vrrp_instance VI_K8S_APISERVER {
+    state BACKUP
+    interface {{ apiserver_lb_effective_interface }}
+    virtual_router_id {{ apiserver_lb_keepalived_vrid }}
+    priority {{ apiserver_lb_effective_priority }}
+    advert_int {{ apiserver_lb_keepalived_advert_int }}
+{% if apiserver_lb_keepalived_nopreempt | bool %}
+    nopreempt
+{% endif %}
+{% if apiserver_lb_keepalived_unicast | bool %}
+    unicast_src_ip {{ node_ip | default(ansible_default_ipv4.address) }}
+    unicast_peer {
+{% for host in groups['kube_control_plane'] if host != inventory_hostname and host not in apiserver_lb_excluded_backends %}
+        {{ hostvars[host].node_ip | default(hostvars[host].ansible_host | default(host)) }}
+{% endfor %}
+    }
+{% endif %}
+    authentication {
+        auth_type PASS
+        auth_pass {{ apiserver_lb_keepalived_auth_pass }}
+    }
+    virtual_ipaddress {
+        {{ apiserver_lb_vip }}/{{ apiserver_lb_vip_prefix }} dev {{ apiserver_lb_effective_interface }}
+    }
+    track_script {
+        chk_apiserver_lb
+    }
+}

@@ -1,0 +1,170 @@
+---
+- name: Ensure manifest directory exists
+  ansible.builtin.file:
+    path: "{{ kube_manifest_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Wait for Kubernetes API
+  ansible.builtin.command: "kubectl --kubeconfig {{ kubeconfig_path }} get --raw=/readyz"
+  register: kube_api_ready
+  changed_when: false
+  retries: 30
+  delay: 5
+  until: kube_api_ready.rc == 0
+
+- name: Download Calico manifest
+  ansible.builtin.get_url:
+    url: "{{ calico_manifest_url }}"
+    dest: "{{ kube_manifest_dir }}/calico-{{ calico_version }}.yaml.raw"
+    mode: "0644"
+  register: calico_manifest_download
+  when: cni_plugin == 'calico'
+
+- name: Check rendered Calico manifest
+  ansible.builtin.stat:
+    path: "{{ kube_manifest_dir }}/calico.yaml"
+  register: calico_rendered_manifest
+  when: cni_plugin == 'calico'
+
+- name: Render Calico manifest
+  ansible.builtin.copy:
+    src: "{{ kube_manifest_dir }}/calico-{{ calico_version }}.yaml.raw"
+    dest: "{{ kube_manifest_dir }}/calico.yaml"
+    remote_src: true
+    mode: "0644"
+  when: cni_plugin == 'calico' and (calico_manifest_download.changed or not calico_rendered_manifest.stat.exists)
+
+- name: Configure Calico pod CIDR from commented default
+  ansible.builtin.replace:
+    path: "{{ kube_manifest_dir }}/calico.yaml"
+    regexp: '(\s*)# - name: CALICO_IPV4POOL_CIDR\n\s*#   value: "192\.168\.0\.0/16"'
+    replace: '\1- name: CALICO_IPV4POOL_CIDR\n\1  value: "{{ pod_network_cidr }}"'
+  when: cni_plugin == 'calico'
+
+- name: Configure Calico pod CIDR from explicit value
+  ansible.builtin.replace:
+    path: "{{ kube_manifest_dir }}/calico.yaml"
+    regexp: '(\s*- name: CALICO_IPV4POOL_CIDR\n\s*value: )"[^"]+"'
+    replace: '\1"{{ pod_network_cidr }}"'
+  when: cni_plugin == 'calico'
+
+- name: Apply Calico manifest
+  ansible.builtin.command: "kubectl --kubeconfig {{ kubeconfig_path }} apply -f {{ kube_manifest_dir }}/calico.yaml"
+  register: calico_apply
+  changed_when: "'created' in calico_apply.stdout or 'configured' in calico_apply.stdout"
+  when: cni_plugin == 'calico'
+
+- name: Download Flannel manifest
+  ansible.builtin.get_url:
+    url: "{{ flannel_manifest_url }}"
+    dest: "{{ kube_manifest_dir }}/kube-flannel-{{ flannel_version }}.yml.raw"
+    mode: "0644"
+  register: flannel_manifest_download
+  when: cni_plugin == 'flannel'
+
+- name: Check rendered Flannel manifest
+  ansible.builtin.stat:
+    path: "{{ kube_manifest_dir }}/kube-flannel.yml"
+  register: flannel_rendered_manifest
+  when: cni_plugin == 'flannel'
+
+- name: Render Flannel manifest
+  ansible.builtin.copy:
+    src: "{{ kube_manifest_dir }}/kube-flannel-{{ flannel_version }}.yml.raw"
+    dest: "{{ kube_manifest_dir }}/kube-flannel.yml"
+    remote_src: true
+    mode: "0644"
+  when: cni_plugin == 'flannel' and (flannel_manifest_download.changed or not flannel_rendered_manifest.stat.exists)
+
+- name: Configure Flannel pod CIDR
+  ansible.builtin.replace:
+    path: "{{ kube_manifest_dir }}/kube-flannel.yml"
+    regexp: '"Network":\s*"[^"]+"'
+    replace: '"Network": "{{ pod_network_cidr }}"'
+  when: cni_plugin == 'flannel'
+
+- name: Apply Flannel manifest
+  ansible.builtin.command: "kubectl --kubeconfig {{ kubeconfig_path }} apply -f {{ kube_manifest_dir }}/kube-flannel.yml"
+  register: flannel_apply
+  changed_when: "'created' in flannel_apply.stdout or 'configured' in flannel_apply.stdout"
+  when: cni_plugin == 'flannel'
+
+- name: Set Helm architecture
+  ansible.builtin.set_fact:
+    helm_arch: "{{ arch_map[ansible_architecture] }}"
+  when: cni_plugin == 'cilium'
+
+- name: Ensure Helm extraction directory exists
+  ansible.builtin.file:
+    path: "/tmp/helm-v{{ helm_version }}-{{ helm_arch }}"
+    state: directory
+    mode: "0755"
+  when: cni_plugin == 'cilium'
+
+- name: Download Helm
+  ansible.builtin.get_url:
+    url: "{{ helm_download_url }}"
+    dest: "/tmp/helm-v{{ helm_version }}-linux-{{ helm_arch }}.tar.gz"
+    mode: "0644"
+  when: cni_plugin == 'cilium'
+
+- name: Unpack Helm
+  ansible.builtin.unarchive:
+    src: "/tmp/helm-v{{ helm_version }}-linux-{{ helm_arch }}.tar.gz"
+    dest: "/tmp/helm-v{{ helm_version }}-{{ helm_arch }}"
+    remote_src: true
+    extra_opts:
+      - --strip-components=1
+    creates: "/tmp/helm-v{{ helm_version }}-{{ helm_arch }}/helm"
+  when: cni_plugin == 'cilium'
+
+- name: Install Helm binary
+  ansible.builtin.copy:
+    src: "/tmp/helm-v{{ helm_version }}-{{ helm_arch }}/helm"
+    dest: /usr/local/bin/helm
+    remote_src: true
+    mode: "0755"
+  when: cni_plugin == 'cilium'
+
+- name: Add Cilium Helm repository
+  ansible.builtin.command: "/usr/local/bin/helm repo add cilium {{ cilium_helm_repo_url }} --force-update"
+  register: cilium_repo_add
+  changed_when: "'has been added' in cilium_repo_add.stdout or 'has been updated' in cilium_repo_add.stdout"
+  when: cni_plugin == 'cilium'
+
+- name: Update Cilium Helm repository
+  ansible.builtin.command: /usr/local/bin/helm repo update cilium
+  changed_when: false
+  when: cni_plugin == 'cilium'
+
+- name: Read installed Cilium release
+  ansible.builtin.command: /usr/local/bin/helm list --namespace kube-system --filter '^cilium$' --output json
+  register: cilium_release_list
+  changed_when: false
+  when: cni_plugin == 'cilium'
+
+- name: Store installed Cilium release data
+  ansible.builtin.set_fact:
+    cilium_release_items: "{{ cilium_release_list.stdout | from_json }}"
+  when: cni_plugin == 'cilium'
+
+- name: Store installed Cilium chart version
+  ansible.builtin.set_fact:
+    cilium_current_chart: "{{ cilium_release_items[0].chart if (cilium_release_items | length > 0) else '' }}"
+  when: cni_plugin == 'cilium'
+
+- name: Install Cilium
+  ansible.builtin.command: >
+    /usr/local/bin/helm upgrade --install cilium cilium/cilium
+    --namespace kube-system
+    --version {{ cilium_version }}
+    --set ipam.operator.clusterPoolIPv4PodCIDRList[0]={{ pod_network_cidr }}
+    --set kubeProxyReplacement={{ cilium_kube_proxy_replacement | string | lower }}
+    {{ '--wait --timeout ' + cilium_wait_timeout if cilium_wait | bool else '' }}
+    {{ cilium_extra_helm_args | join(' ') }}
+  register: cilium_install
+  changed_when: true
+  when:
+    - cni_plugin == 'cilium'
+    - cilium_force_upgrade | bool or cilium_current_chart != 'cilium-' + cilium_version

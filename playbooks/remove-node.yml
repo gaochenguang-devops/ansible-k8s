@@ -1,0 +1,139 @@
+---
+- name: Validate node removal inputs
+  hosts: k8s_cluster
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Validate remove_node_targets
+      ansible.builtin.assert:
+        that:
+          - remove_node_targets | length > 0
+          - remove_node_targets | difference(groups['k8s_cluster']) | length == 0
+          - groups['kube_control_plane'] | difference(remove_node_targets) | length > 0
+        fail_msg: >-
+          Set remove_nodes to inventory hostnames to remove, for example
+          -e '{"remove_nodes":["k8s-worker-2"]}'. Targets must exist in k8s_cluster,
+          and at least one control-plane node must remain.
+      run_once: true
+      tags:
+        - remove
+        - preflight
+
+- name: Stop embedded LB on nodes being removed
+  hosts: k8s_cluster
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Stop Keepalived on removed nodes
+      ansible.builtin.systemd:
+        name: keepalived
+        state: stopped
+        enabled: false
+      failed_when: false
+      when: inventory_hostname in remove_node_targets
+      tags:
+        - remove
+        - lb
+
+    - name: Stop HAProxy on removed nodes
+      ansible.builtin.systemd:
+        name: haproxy
+        state: stopped
+        enabled: false
+      failed_when: false
+      when: inventory_hostname in remove_node_targets
+      tags:
+        - remove
+        - lb
+
+- name: Remove target nodes from apiserver load balancer
+  hosts: kube_control_plane
+  gather_facts: true
+  any_errors_fatal: true
+  vars:
+    apiserver_lb_excluded_backends: "{{ remove_node_targets }}"
+  roles:
+    - role: apiserver_lb
+      when: inventory_hostname not in remove_node_targets
+      tags:
+        - remove
+        - lb
+        - apiserver-lb
+
+- name: Drain nodes from Kubernetes
+  hosts: kube_control_plane
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Drain nodes
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig_path }}
+        drain {{ item }}
+        {{ '--ignore-daemonsets' if remove_node_ignore_daemonsets | bool else '' }}
+        {{ '--delete-emptydir-data' if remove_node_delete_emptydir_data | bool else '' }}
+        {{ '--force' if remove_node_force | bool else '' }}
+        --timeout={{ remove_node_drain_timeout }}
+      loop: "{{ remove_node_targets }}"
+      register: remove_node_drain_result
+      changed_when: remove_node_drain_result.rc == 0
+      failed_when: >
+        remove_node_drain_result.rc != 0 and
+        not (remove_node_ignore_missing | bool and
+        ('not found' in remove_node_drain_result.stderr or 'not found' in remove_node_drain_result.stdout))
+      run_once: true
+      delegate_to: "{{ groups['kube_control_plane'] | difference(remove_node_targets) | first }}"
+      when: remove_node_drain | bool
+      tags:
+        - remove
+        - drain
+
+- name: Reset removed nodes
+  hosts: k8s_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  tasks:
+    - name: Reset Kubernetes state on removed nodes
+      ansible.builtin.include_role:
+        name: reset_cluster
+      vars:
+        reset_start_containerd_after_reset: false
+      when:
+        - remove_node_reset | bool
+        - inventory_hostname in remove_node_targets
+      tags:
+        - remove
+        - reset
+
+- name: Delete node objects from Kubernetes
+  hosts: kube_control_plane
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Delete node objects
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig_path }}
+        delete node {{ item }}
+        {{ '--ignore-not-found=true' if remove_node_ignore_missing | bool else '' }}
+      loop: "{{ remove_node_targets }}"
+      register: remove_node_delete_result
+      changed_when: "'deleted' in remove_node_delete_result.stdout"
+      run_once: true
+      delegate_to: "{{ groups['kube_control_plane'] | difference(remove_node_targets) | first }}"
+      when: remove_node_delete_from_cluster | bool
+      tags:
+        - remove
+        - delete
+
+- name: Reconcile apiserver load balancer after node removal
+  hosts: kube_control_plane
+  gather_facts: true
+  any_errors_fatal: true
+  vars:
+    apiserver_lb_excluded_backends: "{{ remove_node_targets }}"
+  roles:
+    - role: apiserver_lb
+      when: inventory_hostname not in remove_node_targets
+      tags:
+        - remove
+        - lb
+        - apiserver-lb

@@ -1,0 +1,8 @@
+---
+- name: Clear resume state for this cluster
+  ansible.builtin.file:
+    path: "{{ resume_state_dir }}/{{ resume_cluster_key }}"
+    state: absent
+  delegate_to: localhost
+  become: false
+  run_once: true

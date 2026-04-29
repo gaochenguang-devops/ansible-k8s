@@ -1,0 +1,27 @@
+apiVersion: {{ kubeadm_config_api_version }}
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: "{{ node_ip | default(ansible_default_ipv4.address) }}"
+  bindPort: {{ kube_apiserver_port }}
+nodeRegistration:
+  criSocket: "{{ cri_socket }}"
+---
+apiVersion: {{ kubeadm_config_api_version }}
+kind: ClusterConfiguration
+clusterName: "{{ cluster_name }}"
+{% if kube_version | length > 0 %}
+kubernetesVersion: "v{{ kube_version }}"
+{% endif %}
+controlPlaneEndpoint: "{{ kube_control_plane_endpoint }}"
+imageRepository: "{{ kube_image_repository }}"
+networking:
+  dnsDomain: "{{ kube_dns_domain }}"
+  podSubnet: "{{ pod_network_cidr }}"
+  serviceSubnet: "{{ service_cidr }}"
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: "{{ kubelet_cgroup_driver }}"
+{% if kube_effective_semver_for_checks is version('1.35.0', '>=') %}
+failCgroupV1: {{ kubelet_fail_cgroup_v1 | bool | ternary('true', 'false') }}
+{% endif %}

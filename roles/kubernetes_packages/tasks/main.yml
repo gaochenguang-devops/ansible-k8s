@@ -1,0 +1,116 @@
+---
+- name: Refresh apt cache for Kubernetes repository
+  ansible.builtin.apt:
+    update_cache: true
+  when: ansible_os_family == 'Debian'
+
+- name: Resolve Debian Kubernetes package version
+  ansible.builtin.shell: |
+    set -o pipefail
+    apt-cache madison kubelet \
+      | awk '{print $3}' \
+      | awk -v want="{{ kube_version }}" 'want == "" || index($0, want "-") == 1 { print; exit }'
+  args:
+    executable: /bin/bash
+  register: deb_kube_package_version
+  changed_when: false
+  when:
+    - ansible_os_family == 'Debian'
+    - kube_package_version | length == 0
+
+- name: Resolve RPM Kubernetes package version
+  ansible.builtin.shell: |
+    set -o pipefail
+    {{ ansible_pkg_mgr }} --disableexcludes=kubernetes --showduplicates list kubelet 2>/dev/null \
+      | awk '$1 ~ /^kubelet(\.|$)/ {print $2}' \
+      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-' \
+      | awk -v want="{{ kube_version }}" 'want == "" || index($0, want "-") == 1 { print }' \
+      | sort -V \
+      | tail -n 1
+  args:
+    executable: /bin/bash
+  register: rpm_kube_package_version
+  changed_when: false
+  when:
+    - ansible_os_family == 'RedHat'
+    - kube_package_version | length == 0
+
+- name: Store resolved Kubernetes package version
+  ansible.builtin.set_fact:
+    kube_resolved_package_version: >-
+      {{ (kube_package_version
+          if (kube_package_version | length > 0)
+          else (deb_kube_package_version.stdout | default(rpm_kube_package_version.stdout | default('')))) | trim }}
+
+- name: Validate resolved Kubernetes package version
+  ansible.builtin.assert:
+    that:
+      - kube_resolved_package_version | length > 0
+      - kube_resolved_package_version.split() | length == 1
+    fail_msg: "Could not resolve kubelet/kubeadm/kubectl version from the v{{ effective_kube_repo_minor_version }} repository. Adjust kube_version or kube_package_version."
+
+- name: Show resolved Kubernetes package version
+  ansible.builtin.debug:
+    msg: "Resolved Kubernetes package version: {{ kube_resolved_package_version }}"
+
+- name: Build RedHat Kubernetes package list
+  ansible.builtin.set_fact:
+    kube_rpm_packages:
+      - "kubelet-{{ kube_resolved_package_version }}"
+      - "kubeadm-{{ kube_resolved_package_version }}"
+      - "kubectl-{{ kube_resolved_package_version }}"
+  when: ansible_os_family == 'RedHat'
+
+- name: Install Kubernetes packages on Debian family
+  ansible.builtin.apt:
+    name:
+      - "kubelet={{ kube_resolved_package_version }}"
+      - "kubeadm={{ kube_resolved_package_version }}"
+      - "kubectl={{ kube_resolved_package_version }}"
+    state: present
+    allow_downgrade: true
+  when: ansible_os_family == 'Debian'
+
+- name: Install Kubernetes packages on RedHat family
+  ansible.builtin.yum:
+    name: "{{ item }}"
+    state: present
+    disable_excludes: kubernetes
+  loop: "{{ kube_rpm_packages }}"
+  when: ansible_os_family == 'RedHat'
+
+- name: Hold Kubernetes packages on Debian family
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
+  when:
+    - ansible_os_family == 'Debian'
+    - kube_hold_packages | bool
+
+- name: Configure kubelet node IP on Debian family
+  ansible.builtin.copy:
+    dest: /etc/default/kubelet
+    mode: "0644"
+    content: |
+      KUBELET_EXTRA_ARGS=--node-ip={{ node_ip | default(ansible_default_ipv4.address) }}
+  notify: Restart kubelet
+  when: ansible_os_family == 'Debian'
+
+- name: Configure kubelet node IP on RedHat family
+  ansible.builtin.copy:
+    dest: /etc/sysconfig/kubelet
+    mode: "0644"
+    content: |
+      KUBELET_EXTRA_ARGS=--node-ip={{ node_ip | default(ansible_default_ipv4.address) }}
+  notify: Restart kubelet
+  when: ansible_os_family == 'RedHat'
+
+- name: Enable kubelet
+  ansible.builtin.systemd:
+    name: kubelet
+    enabled: true
+    daemon_reload: true

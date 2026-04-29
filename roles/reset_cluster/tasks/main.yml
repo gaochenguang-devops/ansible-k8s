@@ -1,0 +1,349 @@
+---
+- name: Check kubeadm binary
+  ansible.builtin.shell: command -v kubeadm
+  register: reset_kubeadm_binary
+  changed_when: false
+  failed_when: false
+
+- name: Check kubeadm kubelet state
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubeadm_reset_state
+
+- name: Check kubeadm admin state
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: kubeadm_admin_state
+
+- name: Reset kubeadm state when kubeadm is available
+  ansible.builtin.command: "kubeadm reset -f --cri-socket {{ cri_socket }}"
+  register: kubeadm_reset_result
+  changed_when: kubeadm_reset_result.rc == 0
+  failed_when: false
+  when:
+    - reset_kubeadm_binary.rc == 0
+    - kubeadm_reset_state.stat.exists or kubeadm_admin_state.stat.exists
+
+- name: Stop and disable kubelet
+  ansible.builtin.systemd:
+    name: kubelet
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Stop and disable apiserver load balancer services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - keepalived
+    - haproxy
+  failed_when: false
+  when: reset_stop_apiserver_lb | bool
+
+- name: Stop containerd before removing runtime and CNI state
+  ansible.builtin.systemd:
+    name: containerd
+    state: stopped
+  failed_when: false
+
+- name: Find Kubernetes and CNI mount points
+  ansible.builtin.shell: |
+    set -o pipefail
+    awk '$2 ~ "^/(var/run/calico|run/calico|var/run/cilium|run/cilium|var/lib/kubelet|var/lib/cni|run/netns|var/run/netns|sys/fs/bpf)(/|$)" { print $2 }' /proc/self/mountinfo | sort -r -u
+  args:
+    executable: /bin/bash
+  register: reset_mount_points
+  changed_when: false
+  failed_when: false
+
+- name: Unmount Kubernetes and CNI mount points
+  ansible.builtin.command: "umount -l {{ item }}"
+  loop: "{{ reset_mount_points.stdout_lines | default([]) }}"
+  changed_when: false
+  failed_when: false
+
+- name: Find Kubernetes and CNI network interfaces
+  ansible.builtin.shell: |
+    set -o pipefail
+    ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -E '{{ reset_network_link_name_regex }}' || true
+  args:
+    executable: /bin/bash
+  register: reset_network_interfaces
+  changed_when: false
+  failed_when: false
+  when: reset_remove_network_links | bool
+
+- name: Delete Kubernetes and CNI network interfaces
+  ansible.builtin.command: "ip link delete {{ item }}"
+  loop: "{{ reset_network_interfaces.stdout_lines | default([]) | unique | list }}"
+  register: reset_delete_network_link
+  changed_when: reset_delete_network_link.rc == 0
+  failed_when: false
+  when: reset_remove_network_links | bool
+
+- name: Remove Kubernetes and CNI state directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ reset_kubernetes_state_paths }}"
+  ignore_errors: true
+  when: reset_remove_state | bool
+
+- name: Remove Kubernetes pod and container logs when requested
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ reset_pod_log_paths }}"
+  ignore_errors: true
+  when: reset_remove_pod_logs | bool
+
+- name: Remove kubelet host configuration when requested
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ reset_kubelet_config_paths }}"
+  when: reset_remove_kubelet_config | bool
+
+- name: Remove CNI binaries when requested
+  ansible.builtin.file:
+    path: /opt/cni/bin
+    state: absent
+  when: reset_remove_cni_binaries | bool
+
+- name: Remove containerd data when requested
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/lib/containerd
+    - /run/containerd
+  when: reset_remove_containerd_data | bool
+
+- name: Remove containerd configuration when requested
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ reset_containerd_config_paths }}"
+  when: reset_remove_containerd_config | bool
+
+- name: Remove generated manifests and downloads when requested
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ kube_manifest_dir }}"
+    - "/tmp/helm-v{{ helm_version }}-linux-{{ arch_map[ansible_architecture] | default(ansible_architecture) }}.tar.gz"
+    - "/tmp/helm-v{{ helm_version }}-{{ arch_map[ansible_architecture] | default(ansible_architecture) }}"
+  when: reset_remove_downloads | bool
+
+- name: Remove apiserver load balancer configuration when requested
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ reset_apiserver_lb_config_paths }}"
+  when: reset_remove_apiserver_lb_config | bool
+
+- name: Remove managed cluster hosts entries
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED K8S CLUSTER HOSTS"
+    state: absent
+  when: reset_remove_etc_hosts | bool
+
+- name: Remove Kubernetes OS tuning files when requested
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ reset_os_tuning_paths }}"
+  when: reset_remove_os_tuning | bool
+
+- name: Re-apply sysctl after removing Kubernetes tuning files
+  ansible.builtin.command: sysctl --system
+  changed_when: false
+  failed_when: false
+  when: reset_remove_os_tuning | bool
+
+- name: Flush iptables and delete custom chains
+  ansible.builtin.shell: |
+    set +e
+    bins="iptables"
+    {% if reset_flush_ip6tables | bool %}
+    bins="$bins ip6tables"
+    {% endif %}
+    for bin in $bins; do
+      command -v "$bin" >/dev/null 2>&1 || continue
+      for table in filter nat mangle raw; do
+        "$bin" -t "$table" -F 2>/dev/null || true
+        "$bin" -t "$table" -X 2>/dev/null || true
+      done
+    done
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  when: reset_flush_iptables | bool
+
+- name: Flush nftables ruleset when explicitly requested
+  ansible.builtin.command: nft flush ruleset
+  changed_when: false
+  failed_when: false
+  when: reset_flush_nftables | bool
+
+- name: Clear IPVS tables
+  ansible.builtin.command: ipvsadm --clear
+  changed_when: false
+  failed_when: false
+  when: reset_flush_iptables | bool
+
+- name: Unhold Kubernetes packages on Debian family when requested
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: install
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
+  failed_when: false
+  when:
+    - reset_remove_packages | bool
+    - ansible_os_family == 'Debian'
+
+- name: Remove Kubernetes packages when requested on Debian family
+  ansible.builtin.apt:
+    name:
+      - kubelet
+      - kubeadm
+      - kubectl
+      - kubernetes-cni
+      - cri-tools
+    state: absent
+    purge: true
+  when:
+    - reset_remove_packages | bool
+    - ansible_os_family == 'Debian'
+
+- name: Remove Kubernetes packages when requested on RedHat family
+  ansible.builtin.package:
+    name:
+      - kubelet
+      - kubeadm
+      - kubectl
+      - kubernetes-cni
+      - cri-tools
+    state: absent
+  when:
+    - reset_remove_packages | bool
+    - ansible_os_family == 'RedHat'
+
+- name: Remove apiserver load balancer packages when requested
+  ansible.builtin.package:
+    name:
+      - haproxy
+      - keepalived
+    state: absent
+  when: reset_remove_apiserver_lb_packages | bool
+
+- name: Remove containerd packages when requested
+  ansible.builtin.package:
+    name:
+      - containerd.io
+      - containerd
+    state: absent
+  failed_when: false
+  when: reset_remove_containerd_package | bool
+
+- name: Remove Kubernetes repository files on Debian family
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ reset_kubernetes_repo_paths_debian }}"
+  when:
+    - reset_remove_kubernetes_repo | bool
+    - ansible_os_family == 'Debian'
+
+- name: Find generated Kubernetes apt keyrings
+  ansible.builtin.find:
+    paths:
+      - /etc/apt/keyrings
+      - /tmp
+    patterns:
+      - "kubernetes-v*-apt-keyring.gpg"
+      - "kubernetes-v*-Release.key"
+    file_type: file
+  register: reset_kubernetes_apt_generated_files
+  failed_when: false
+  when:
+    - reset_remove_kubernetes_repo | bool
+    - ansible_os_family == 'Debian'
+
+- name: Remove generated Kubernetes apt keyrings
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ reset_kubernetes_apt_generated_files.files | default([]) }}"
+  when:
+    - reset_remove_kubernetes_repo | bool
+    - ansible_os_family == 'Debian'
+
+- name: Remove Kubernetes repository files on RedHat family
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ reset_kubernetes_repo_paths_redhat }}"
+  when:
+    - reset_remove_kubernetes_repo | bool
+    - ansible_os_family == 'RedHat'
+
+- name: Remove containerd upstream repository files on Debian family
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ reset_containerd_repo_paths_debian }}"
+  when:
+    - reset_remove_containerd_repo | bool
+    - ansible_os_family == 'Debian'
+
+- name: Remove containerd upstream repository files on RedHat family
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ reset_containerd_repo_paths_redhat }}"
+  when:
+    - reset_remove_containerd_repo | bool
+    - ansible_os_family == 'RedHat'
+
+- name: Refresh apt cache after repository cleanup
+  ansible.builtin.apt:
+    update_cache: true
+  failed_when: false
+  when:
+    - ansible_os_family == 'Debian'
+    - reset_remove_kubernetes_repo | bool or reset_remove_containerd_repo | bool
+
+- name: Clean package manager metadata on RedHat family
+  ansible.builtin.command: "{{ ansible_pkg_mgr }} clean all"
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_os_family == 'RedHat'
+    - reset_remove_kubernetes_repo | bool or reset_remove_containerd_repo | bool
+
+- name: Reload systemd after cleanup
+  ansible.builtin.systemd:
+    daemon_reload: true
+  failed_when: false
+
+- name: Start containerd after reset
+  ansible.builtin.systemd:
+    name: containerd
+    state: started
+    enabled: true
+    daemon_reload: true
+  failed_when: false
+  when:
+    - reset_start_containerd_after_reset | bool
+    - not reset_remove_containerd_data | bool
+    - not reset_remove_containerd_config | bool
+    - not reset_remove_containerd_package | bool
