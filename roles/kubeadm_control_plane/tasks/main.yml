@@ -246,6 +246,15 @@
     - not kubeadm_kubelet_conf.stat.exists
   throttle: 1
 
+- name: Ensure kubeconfig directory exists
+  ansible.builtin.file:
+    path: "{{ kubeconfig_home }}/.kube"
+    state: directory
+    owner: "{{ kubeconfig_owner }}"
+    group: "{{ kubeconfig_group }}"
+    mode: "0700"
+  when: inventory_hostname != groups['kube_control_plane'][0]
+
 - name: Copy admin kubeconfig
   ansible.builtin.copy:
     src: /etc/kubernetes/admin.conf

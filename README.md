@@ -1205,6 +1205,19 @@ ansible-playbook playbooks/remove-node.yml -e '{"remove_nodes":["k8s-worker-2"]}
 ansible-playbook playbooks/verify.yml
 ```
 
+### 11.ansible在ubuntu 22.04执行失败，默认ansible版本过低
+
+```
+# 安装软件源依赖
+sudo apt update && sudo apt install -y software-properties-common
+# 添加 Ansible 官方源
+sudo add-apt-repository --yes --update ppa:ansible/ansible
+# 升级 Ansible
+sudo apt install -y ansible
+```
+
+
+
 ## 生产环境建议
 
 - Kubernetes、containerd、CNI 都固定精确版本，不要生产环境长期使用“最新 patch”自动漂移。
